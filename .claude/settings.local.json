@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:blog.cloudflare.com)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebSearch",
+      "Bash(chmod:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
