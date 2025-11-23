@@ -158,9 +158,11 @@ make build-runtime
 
 ## What's Next?
 
-- Read [design.md](./design.md) for architecture details
-- Check [examples/](./examples/) for code examples
-- Read the full [README.md](./README.md) for API documentation
+- **TypeScript Examples**: See [docs/TYPESCRIPT_EXAMPLES.md](docs/TYPESCRIPT_EXAMPLES.md) for detailed code examples
+- **Architecture**: Read [docs/design.md](docs/design.md) for architecture details
+- **Security**: Check [docs/GVISOR.md](docs/GVISOR.md) for gVisor configuration
+- **Build Details**: See [docs/BUILD.md](docs/BUILD.md) for compilation info
+- **API Reference**: Read the full [README.md](./README.md) for API documentation
 
 ## Troubleshooting
 

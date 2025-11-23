@@ -30,14 +30,19 @@ assist-tee/
 │   └── runtime/                # Deno runtime service
 │       ├── runner.ts           # Stdin wrapper that calls user handlers
 │       └── Dockerfile          # Runtime container
+├── docs/                       # Documentation
+│   ├── design.md               # Architecture documentation
+│   ├── GVISOR.md               # gVisor security configuration
+│   ├── BUILD.md                # Build and compilation guide
+│   └── TYPESCRIPT_EXAMPLES.md  # TypeScript usage examples
 ├── examples/                   # Example user code
 │   ├── main.ts
 │   └── utils.ts
 ├── scripts/
 │   └── test-full-flow.sh      # End-to-end test
-├── docker-compose.yml          # All services (API + PostgreSQL)
+├── docker-compose.yml          # Production (gVisor enabled)
+├── docker-compose.dev.yml      # Development (gVisor disabled)
 ├── Makefile                    # Build and run commands
-├── design.md                   # Architecture documentation
 ├── README.md                   # This file
 ├── QUICKSTART.md              # 5-minute getting started
 └── .gitignore
