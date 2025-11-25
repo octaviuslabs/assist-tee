@@ -5,12 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/jsfour/assist-tee/internal/executor"
 	"github.com/jsfour/assist-tee/internal/logger"
 	"github.com/jsfour/assist-tee/internal/models"
 )
 
-func HandleSetup(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logger.FromContext(ctx)
 
@@ -59,7 +58,7 @@ func HandleSetup(w http.ResponseWriter, r *http.Request) {
 		slog.Int("module_count", len(req.Modules)),
 	)
 
-	env, err := executor.SetupEnvironment(ctx, &req)
+	env, err := s.Executor.SetupEnvironment(ctx, &req)
 	done(err)
 
 	if err != nil {

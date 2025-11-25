@@ -1,5 +1,8 @@
 #!/usr/bin/env -S deno run --allow-read=/workspace,/runtime --allow-env
 
+
+// I'm actually thinking that here we should use SSE. Basically, as the user makes the handler request, we should open up a socket and stream back logs and everything else to the user. I think we're going to want to stream back with some kind of header on each line, maybe there's a log header and then there's a final result header or something like that for the final result. 
+
 /**
  * TEE Runtime Wrapper
  *
@@ -205,7 +208,7 @@ async function main() {
     if (typeof module.handler !== "function") {
       throw new Error(
         `Module '${input.mainModule}' does not export a 'handler' function.\n` +
-          `Expected: export async function handler(event, context) { ... }`
+        `Expected: export async function handler(event, context) { ... }`
       );
     }
 

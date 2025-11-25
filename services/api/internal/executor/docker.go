@@ -26,7 +26,7 @@ func IsGVisorDisabled() bool {
 	return os.Getenv("DISABLE_GVISOR") == "true" || os.Getenv("DISABLE_GVISOR") == "1"
 }
 
-func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.Environment, error) {
+func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.Environment, error) {
 	envID := uuid.New()
 	volumeName := fmt.Sprintf("tee-env-%s", envID.String())
 	log := logger.FromContext(ctx)
@@ -183,7 +183,7 @@ func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.En
 	}, nil
 }
 
-func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.ExecuteRequest) (*models.ExecutionResponse, error) {
+func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.ExecuteRequest) (*models.ExecutionResponse, error) {
 	log := logger.FromContext(ctx)
 
 	// Acquire semaphore
@@ -311,11 +311,32 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 	cmd := exec.CommandContext(execCtx, "docker", args...)
 	cmd.Stdin = bytes.NewReader(inputJSON)
 
+	// Create streaming writers that log output in real-time
+	stdoutWriter := &streamingWriter{
+		log:    log,
+		stream: "stdout",
+		prefix: "execution output",
+		envID:  envID.String(),
+		execID: execID.String(),
+	}
+	stderrWriter := &streamingWriter{
+		log:    log,
+		stream: "stderr",
+		prefix: "execution output",
+		envID:  envID.String(),
+		execID: execID.String(),
+	}
+
+	// Also capture full output for parsing the result
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = io.MultiWriter(stdoutWriter, &stdout)
+	cmd.Stderr = io.MultiWriter(stderrWriter, &stderr)
 
 	err = cmd.Run()
+
+	// Flush any remaining buffered output
+	stdoutWriter.Flush()
+	stderrWriter.Flush()
 	duration := time.Since(startTime)
 
 	// 6. Handle exit
@@ -430,7 +451,7 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 	}, nil
 }
 
-func DeleteEnvironment(ctx context.Context, envID uuid.UUID) error {
+func (e *DockerExecutor) DeleteEnvironment(ctx context.Context, envID uuid.UUID) error {
 	log := logger.FromContext(ctx)
 
 	// Get volume name
@@ -477,9 +498,12 @@ func DeleteEnvironment(ctx context.Context, envID uuid.UUID) error {
 
 // streamingWriter wraps a logger to stream output line by line
 type streamingWriter struct {
-	log    *slog.Logger
-	stream string // "stdout" or "stderr"
-	buffer []byte
+	log     *slog.Logger
+	stream  string // "stdout" or "stderr"
+	prefix  string // log message prefix (e.g., "dependency install", "execution")
+	envID   string // optional environment ID for context
+	execID  string // optional execution ID for context
+	buffer  []byte
 }
 
 func (w *streamingWriter) Write(p []byte) (n int, err error) {
@@ -496,10 +520,17 @@ func (w *streamingWriter) Write(p []byte) (n int, err error) {
 		w.buffer = w.buffer[idx+1:]
 
 		if line != "" {
-			w.log.Info("dependency install",
+			attrs := []any{
 				slog.String("stream", w.stream),
 				slog.String("output", line),
-			)
+			}
+			if w.envID != "" {
+				attrs = append(attrs, slog.String("env_id", w.envID))
+			}
+			if w.execID != "" {
+				attrs = append(attrs, slog.String("exec_id", w.execID))
+			}
+			w.log.Info(w.prefix, attrs...)
 		}
 	}
 
@@ -509,10 +540,17 @@ func (w *streamingWriter) Write(p []byte) (n int, err error) {
 func (w *streamingWriter) Flush() {
 	// Flush any remaining content
 	if len(w.buffer) > 0 {
-		w.log.Info("dependency install",
+		attrs := []any{
 			slog.String("stream", w.stream),
 			slog.String("output", string(w.buffer)),
-		)
+		}
+		if w.envID != "" {
+			attrs = append(attrs, slog.String("env_id", w.envID))
+		}
+		if w.execID != "" {
+			attrs = append(attrs, slog.String("exec_id", w.execID))
+		}
+		w.log.Info(w.prefix, attrs...)
 		w.buffer = nil
 	}
 }
@@ -581,8 +619,8 @@ func installDependencies(ctx context.Context, volumeName string, deps *models.De
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
 
 	// Create streaming writers that log output in real-time
-	stdoutWriter := &streamingWriter{log: log, stream: "stdout"}
-	stderrWriter := &streamingWriter{log: log, stream: "stderr"}
+	stdoutWriter := &streamingWriter{log: log, stream: "stdout", prefix: "dependency install"}
+	stderrWriter := &streamingWriter{log: log, stream: "stderr", prefix: "dependency install"}
 
 	// Also capture full output for error reporting
 	var stdoutBuf, stderrBuf bytes.Buffer

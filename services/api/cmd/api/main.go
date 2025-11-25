@@ -102,14 +102,18 @@ func main() {
 	// Start background reaper
 	reaper.StartReaper()
 
+	// Create executor and server
+	exec := executor.NewDockerExecutor()
+	server := handlers.NewServer(exec)
+
 	// Setup routes
 	r := mux.NewRouter()
 
 	// API routes
-	r.HandleFunc("/environments/setup", handlers.HandleSetup).Methods("POST")
-	r.HandleFunc("/environments/{id}/execute", handlers.HandleExecute).Methods("POST")
-	r.HandleFunc("/environments/{id}", handlers.HandleDelete).Methods("DELETE")
-	r.HandleFunc("/environments", handlers.HandleList).Methods("GET")
+	r.HandleFunc("/environments/setup", server.HandleSetup).Methods("POST")
+	r.HandleFunc("/environments/{id}/execute", server.HandleExecute).Methods("POST")
+	r.HandleFunc("/environments/{id}", server.HandleDelete).Methods("DELETE")
+	r.HandleFunc("/environments", server.HandleList).Methods("GET")
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))

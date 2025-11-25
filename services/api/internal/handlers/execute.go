@@ -7,12 +7,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/jsfour/assist-tee/internal/executor"
 	"github.com/jsfour/assist-tee/internal/logger"
 	"github.com/jsfour/assist-tee/internal/models"
 )
 
-func HandleExecute(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logger.FromContext(ctx)
 
@@ -59,7 +58,7 @@ func HandleExecute(w http.ResponseWriter, r *http.Request) {
 		slog.String("environment_id", envID.String()),
 	)
 
-	resp, err := executor.ExecuteInEnvironment(ctx, envID, &req)
+	resp, err := s.Executor.ExecuteInEnvironment(ctx, envID, &req)
 	done(err)
 
 	if err != nil {

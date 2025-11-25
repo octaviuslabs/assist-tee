@@ -4,7 +4,8 @@
       "WebFetch(domain:blog.cloudflare.com)",
       "WebFetch(domain:www.anthropic.com)",
       "WebSearch",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(go test:*)"
     ],
     "deny": [],
     "ask": []

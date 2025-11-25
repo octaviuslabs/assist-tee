@@ -6,11 +6,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/jsfour/assist-tee/internal/executor"
 	"github.com/jsfour/assist-tee/internal/logger"
 )
 
-func HandleDelete(w http.ResponseWriter, r *http.Request) {
+func (s *Server) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logger.FromContext(ctx)
 
@@ -33,7 +32,7 @@ func HandleDelete(w http.ResponseWriter, r *http.Request) {
 		slog.String("environment_id", envID.String()),
 	)
 
-	err = executor.DeleteEnvironment(ctx, envID)
+	err = s.Executor.DeleteEnvironment(ctx, envID)
 	done(err)
 
 	if err != nil {
