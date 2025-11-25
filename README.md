@@ -1,11 +1,78 @@
+```
+ ░▒▓██████▓▒░  
+░▒▓█▓▒░░▒▓█▓▒░ 
+░▒▓█▓▒░░▒▓█▓▒░ 
+░▒▓█▓▒░░▒▓█▓▒░  Octavius Labs
+░▒▓█▓▒░░▒▓█▓▒░ 
+░▒▓█▓▒░░▒▓█▓▒░ 
+ ░▒▓██████▓▒░
+```
+
 # Assist TEE - Trusted Execution Environment
 
-A secure, sandboxed code execution service for AI agents. Execute TypeScript/JavaScript code in isolated gVisor containers with Lambda-style handlers.
+> **Note:** This project was built with [Claude Code](https://claude.ai/code),
+> Anthropic's AI coding assistant.
+
+## Why?
+
+AI agents are increasingly capable of writing and executing code. But running
+AI-generated code is inherently risky—the code might have bugs, access resources
+it shouldn't, or behave unexpectedly. You can't just `eval()` it and hope for
+the best.
+
+**Assist TEE solves this problem** by providing a secure sandbox where AI agents
+can execute code without risking your infrastructure. Every execution runs in a
+hardware-isolated [gVisor](https://gvisor.dev/) container with:
+
+- **No network access** - Code can't phone home or exfiltrate data
+- **No filesystem access** - Can only read its own modules
+- **Resource limits** - CPU, memory, and time constraints prevent runaway
+  processes
+- **Fresh containers** - Each execution starts clean, no state leakage between
+  runs
+
+The result: AI agents can write and run TypeScript/JavaScript code with the
+confidence that even malicious code can't escape the sandbox.
+
+## How It Works
+
+Assist TEE uses a **two-phase execution model** inspired by AWS Lambda:
+
+1. **Setup Phase** (~500ms-2s): Upload your code modules once, install
+   dependencies with network access, then lock down the environment
+2. **Execute Phase** (~100-200ms): Run your handler function many times against
+   the prepared environment—fast, isolated, and stateless
+
+```
+┌─────────────┐     Setup      ┌─────────────────┐     Execute     ┌─────────────┐
+│  AI Agent   │ ──────────────▶│  TEE API (Go)   │ ──────────────▶ │   gVisor    │
+│             │   modules +     │                 │   event data    │  Container  │
+│             │   dependencies  │   PostgreSQL    │                 │  (Deno)     │
+└─────────────┘                └─────────────────┘                 └─────────────┘
+```
+
+Your code exports a simple `handler` function—just like Lambda:
+
+```typescript
+export async function handler(event: any, context: any) {
+  const { a, b } = event.data;
+  return { sum: a + b };
+}
+```
+
+## Inspirations
+
+- [Cloudflare's Code Mode](https://blog.cloudflare.com/code-mode/) - AI writes
+  code to interact with MCP servers
+- [Anthropic's Code Execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) -
+  Secure code execution for AI agents
 
 ## Features
 
-- **Lambda-style handlers** - Familiar `export async function handler(event, context)` pattern
-- **Two-phase execution** - Setup once, execute many times for optimal performance
+- **Lambda-style handlers** - Familiar
+  `export async function handler(event, context)` pattern
+- **Two-phase execution** - Setup once, execute many times for optimal
+  performance
 - **Strong isolation** - gVisor runtime provides VM-level security
 - **Environment reuse** - Prepared environments stored in Docker volumes
 - **Automatic cleanup** - TTL-based garbage collection of unused environments
@@ -128,9 +195,11 @@ curl -X POST http://localhost:8080/environments/setup \
   }'
 ```
 
-Dependencies are downloaded during setup (with network) and cached for execution (without network). See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for details.
+Dependencies are downloaded during setup (with network) and cached for execution
+(without network). See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for details.
 
 Response:
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -163,6 +232,7 @@ curl -X POST http://localhost:8080/environments/$ENV_ID/execute \
 ```
 
 Response:
+
 ```json
 {
   "id": "exec-abc123...",
@@ -206,7 +276,7 @@ export async function handler(event: any, context: any) {
   // Return result (auto JSON serialized)
   return {
     sum: result,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   };
 }
 ```
@@ -235,10 +305,12 @@ export function add(a: number, b: number): number {
 ```
 
 This runs 5 comprehensive test suites:
+
 1. ✓ **Basic functionality** - Environment setup, execution, cleanup
 2. ✓ **Network sandboxing** - HTTP, DNS, WebSocket blocking
 3. ✓ **Filesystem sandboxing** - Read/write restrictions, command blocking
-4. ✓ **Deno permissions** - All permission flags (net, read, write, run, ffi, hrtime)
+4. ✓ **Deno permissions** - All permission flags (net, read, write, run, ffi,
+   hrtime)
 5. ✓ **Dependency handling** - Local vs remote imports, npm packages
 
 ### Individual Test Suites
@@ -270,7 +342,8 @@ Client → TEE API (Go) → PostgreSQL (metadata)
 ### Execution Flow
 
 1. **Setup**: Create volume, write modules, store metadata (~500ms-2s)
-2. **Execute**: Spawn container, pipe JSON to stdin, run handler, capture stdout (~100-200ms)
+2. **Execute**: Spawn container, pipe JSON to stdin, run handler, capture stdout
+   (~100-200ms)
 3. **Cleanup**: Automatic reaping after TTL expires
 
 ## Service Management
@@ -291,7 +364,8 @@ make build-runtime
 
 ### Run Individual Services
 
-The services are designed to run together via docker-compose, but you can run them individually:
+The services are designed to run together via docker-compose, but you can run
+them individually:
 
 ```bash
 # Start PostgreSQL first
@@ -337,6 +411,7 @@ Environment variables for the API service:
 For development on macOS/Windows where gVisor is not available:
 
 **Option 1: Use dev compose file** (Recommended)
+
 ```bash
 make run-dev
 # or
@@ -344,6 +419,7 @@ docker-compose -f docker-compose.dev.yml up -d
 ```
 
 **Option 2: Set environment variable**
+
 ```yaml
 # docker-compose.yml
 environment:
@@ -351,11 +427,13 @@ environment:
 ```
 
 **Option 3: Set when running**
+
 ```bash
 DISABLE_GVISOR=true go run cmd/api/main.go
 ```
 
 ⚠️ **WARNING:** When gVisor is disabled:
+
 - Code is NOT sandboxed with hardware virtualization
 - User code can potentially access the host kernel
 - This mode should ONLY be used for local development
@@ -407,12 +485,12 @@ SELECT * FROM executions ORDER BY started_at DESC LIMIT 10;
 
 ## Performance
 
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| Environment setup | 500ms - 2s | One-time cost |
-| Execution | 100-200ms | Per execution |
-| Volume I/O | <10ms | Reading modules |
-| DB operations | <5ms | Metadata lookups |
+| Operation         | Latency    | Notes            |
+| ----------------- | ---------- | ---------------- |
+| Environment setup | 500ms - 2s | One-time cost    |
+| Execution         | 100-200ms  | Per execution    |
+| Volume I/O        | <10ms      | Reading modules  |
+| DB operations     | <5ms       | Metadata lookups |
 
 ## Troubleshooting
 
@@ -449,9 +527,9 @@ docker-compose ps postgres
 docker exec tee-api nc -zv postgres 5432
 ```
 
-## Future Enhancements
+## Roadmap
 
-- [ ] Dependency pre-installation in setup phase
+- [x] Dependency pre-installation in setup phase
 - [ ] Warm container pools for faster execution
 - [ ] Multi-language support (Python, Go, Rust)
 - [ ] WebSocket streaming for long-running executions
@@ -461,8 +539,16 @@ docker exec tee-api nc -zv postgres 5432
 
 ## License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
+for details.
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR.
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
+and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting a pull request.
+
+## Security
+
+If you discover a security vulnerability, please do NOT open a public issue.
+Instead, email the maintainers directly. See
+[CONTRIBUTING.md](CONTRIBUTING.md#security) for details.
