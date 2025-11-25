@@ -21,6 +21,14 @@ import (
 
 var execSemaphore = make(chan struct{}, 50) // Max 50 concurrent executions
 
+// RuntimeImage returns the Docker image to use for code execution
+func RuntimeImage() string {
+	if img := os.Getenv("RUNTIME_IMAGE"); img != "" {
+		return img
+	}
+	return "octaviusdeployment/assist-tee-rt-deno:latest"
+}
+
 // IsGVisorDisabled checks if gVisor is disabled via environment variable
 func IsGVisorDisabled() bool {
 	return os.Getenv("DISABLE_GVISOR") == "true" || os.Getenv("DISABLE_GVISOR") == "1"
@@ -303,7 +311,7 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		"-v", fmt.Sprintf("%s:/workspace:ro", volumeName),
 		"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Mount cached dependencies
 		"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
-		"deno-runtime:latest",
+		RuntimeImage(),
 	)
 
 	// 5. Execute with stdin
@@ -610,7 +618,7 @@ func installDependencies(ctx context.Context, volumeName string, deps *models.De
 		"-v", fmt.Sprintf("%s:/deno-dir", volumeName), // Cache in volume
 		"-e", "DENO_DIR=/deno-dir",
 		"-w", "/workspace",
-		"deno-runtime:latest",
+		RuntimeImage(),
 		"-c", cacheScript,
 	}
 
