@@ -1,40 +1,80 @@
-# Binaries for programs and plugins
+# Binaries
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary, built with `go test -c`
+# Go
 *.test
-
-# Output of the go coverage tool
 *.out
-
-# Go workspace file
 go.work
-
-# Dependency directories
+go.work.sum
 vendor/
 
-# Environment files
-.env
-.env.local
+# Node/Deno
+node_modules/
+.deno/
+deno.lock
 
-# IDE
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# IDE and editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.project
+.classpath
+.settings/
 
-# OS
+# OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# Logs
+# Logs and databases
 *.log
-
-# Database
 *.db
 *.sqlite
+*.sqlite3
+
+# Build artifacts
+dist/
+build/
+tmp/
+temp/
+
+# Test coverage
+coverage/
+*.cover
+*.coverage
+htmlcov/
+
+# Docker
+docker-compose.override.yml
+
+# AI assistants
+.claude/
+.cursor/
+.aider*
+
+# Nix
+result
+result-*
+
+# Local configuration
+*.local
+local/
