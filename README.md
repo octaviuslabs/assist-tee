@@ -10,8 +10,7 @@
 
 # Assist TEE - Trusted Execution Environment
 
-> **Note:** This project was built with [Claude Code](https://claude.ai/code),
-> Anthropic's AI coding assistant.
+> **Note:** This project was built with the help of Claude Code.
 
 ## Why?
 
