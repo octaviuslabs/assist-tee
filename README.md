@@ -142,9 +142,48 @@ sudo systemctl restart docker
 docker run --rm --runtime=runsc hello-world
 ```
 
-### Build and Run
+### Option 1: Using Docker Hub (Recommended)
+
+Pull the pre-built images and run:
 
 ```bash
+# Pull images
+docker pull octaviusdeployment/assist-tee-api:latest
+docker pull octaviusdeployment/assist-tee-rt-deno:latest
+
+# Start PostgreSQL
+docker run -d --name tee-postgres \
+  -e POSTGRES_USER=tee \
+  -e POSTGRES_PASSWORD=tee \
+  -e POSTGRES_DB=tee \
+  -p 5432:5432 \
+  postgres:16-alpine
+
+# Start the API
+docker run -d --name tee-api \
+  -p 8080:8080 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e DB_HOST=host.docker.internal \
+  -e DB_USER=tee \
+  -e DB_PASSWORD=tee \
+  -e DB_NAME=tee \
+  -e RUNTIME_IMAGE=octaviusdeployment/assist-tee-rt-deno:latest \
+  -e DISABLE_GVISOR=true \
+  octaviusdeployment/assist-tee-api:latest
+
+# Verify it's running
+curl http://localhost:8080/health
+```
+
+> **Note:** Set `DISABLE_GVISOR=true` on macOS/Windows. On Linux with gVisor installed, remove this flag for full sandboxing.
+
+### Option 2: Build from Source
+
+```bash
+# Clone the repo
+git clone https://github.com/your-org/assist-tee.git
+cd assist-tee
+
 # Build all service images
 make build
 
