@@ -6,7 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jsfour/assist-tee/internal/database"
+	"github.com/jsfour/assist-tee/internal/logger"
 	"github.com/jsfour/assist-tee/internal/models"
 )
 
@@ -27,15 +29,36 @@ func IsGVisorDisabled() bool {
 func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.Environment, error) {
 	envID := uuid.New()
 	volumeName := fmt.Sprintf("tee-env-%s", envID.String())
+	log := logger.FromContext(ctx)
+
+	log.Debug("starting environment setup",
+		slog.String("environment_id", envID.String()),
+		slog.String("volume_name", volumeName),
+		slog.String("main_module", req.MainModule),
+		slog.Int("module_count", len(req.Modules)),
+	)
 
 	// 1. Create Docker volume
+	log.Debug("creating docker volume",
+		slog.String("volume_name", volumeName),
+	)
 	cmd := exec.CommandContext(ctx, "docker", "volume", "create", volumeName)
 	if err := cmd.Run(); err != nil {
+		log.Error("failed to create docker volume",
+			slog.String("volume_name", volumeName),
+			slog.String("error", err.Error()),
+		)
 		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
 
 	// 2. Write modules to volume
+	// The deno user in the container has UID 1000, so we need to set ownership
 	for filename, content := range req.Modules {
+		log.Debug("writing module to volume",
+			slog.String("filename", filename),
+			slog.Int("content_length", len(content)),
+		)
+
 		// Escape single quotes in content
 		escapedContent := strings.ReplaceAll(content, "'", "'\\''")
 
@@ -47,23 +70,82 @@ func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.En
 		)
 
 		if err := cmd.Run(); err != nil {
+			log.Error("failed to write module",
+				slog.String("filename", filename),
+				slog.String("error", err.Error()),
+			)
 			// Cleanup volume on failure
 			exec.Command("docker", "volume", "rm", "-f", volumeName).Run()
 			return nil, fmt.Errorf("failed to write %s: %w", filename, err)
 		}
 	}
 
-	// 3. Store metadata
+	// 2b. Fix ownership for deno user (UID 1000 in the deno image)
+	log.Debug("setting volume ownership for deno user")
+	chownCmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+		"-v", fmt.Sprintf("%s:/workspace", volumeName),
+		"busybox:latest",
+		"sh", "-c", "chown -R 1000:1000 /workspace",
+	)
+	if err := chownCmd.Run(); err != nil {
+		log.Warn("failed to set volume ownership",
+			slog.String("error", err.Error()),
+		)
+		// Don't fail - it might still work if deps aren't needed
+	}
+
+	log.Debug("all modules written successfully",
+		slog.Int("module_count", len(req.Modules)),
+	)
+
+	// 3. Install dependencies (if specified)
+	if req.Dependencies != nil && (len(req.Dependencies.NPM) > 0 || len(req.Dependencies.Deno) > 0) {
+		depCount := len(req.Dependencies.NPM) + len(req.Dependencies.Deno)
+		log.Info("installing dependencies",
+			slog.String("environment_id", envID.String()),
+			slog.Int("npm_count", len(req.Dependencies.NPM)),
+			slog.Int("deno_count", len(req.Dependencies.Deno)),
+			slog.Int("total_count", depCount),
+		)
+
+		if err := installDependencies(ctx, volumeName, req.Dependencies); err != nil {
+			log.Error("dependency installation failed",
+				slog.String("environment_id", envID.String()),
+				slog.String("error", err.Error()),
+			)
+			// Cleanup volume on failure
+			exec.Command("docker", "volume", "rm", "-f", volumeName).Run()
+			return nil, fmt.Errorf("failed to install dependencies: %w", err)
+		}
+
+		log.Info("dependencies installed successfully",
+			slog.String("environment_id", envID.String()),
+		)
+	}
+
+	// 4. Store metadata
 	ttl := req.TTLSeconds
 	if ttl == 0 {
 		ttl = 3600 // Default 1 hour
 	}
 
+	depCount := 0
+	if req.Dependencies != nil {
+		depCount = len(req.Dependencies.NPM) + len(req.Dependencies.Deno)
+	}
+
 	metadata := map[string]interface{}{
-		"permissions": req.Permissions,
-		"moduleCount": len(req.Modules),
+		"permissions":     req.Permissions,
+		"moduleCount":     len(req.Modules),
+		"dependencyCount": depCount,
+		"hasDependencies": depCount > 0,
 	}
 	metadataJSON, _ := json.Marshal(metadata)
+
+	log.Debug("storing environment metadata",
+		slog.String("environment_id", envID.String()),
+		slog.Int("ttl_seconds", ttl),
+	)
 
 	_, err := database.DB.ExecContext(ctx, `
 		INSERT INTO environments (id, volume_name, main_module, metadata, ttl_seconds)
@@ -71,10 +153,23 @@ func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.En
 	`, envID, volumeName, req.MainModule, metadataJSON, ttl)
 
 	if err != nil {
+		log.Error("failed to store environment in database",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", err.Error()),
+		)
 		// Cleanup volume on DB failure
 		exec.Command("docker", "volume", "rm", "-f", volumeName).Run()
 		return nil, fmt.Errorf("failed to store environment: %w", err)
 	}
+
+	log.Info("environment setup completed",
+		slog.String("environment_id", envID.String()),
+		slog.String("volume_name", volumeName),
+		slog.String("main_module", req.MainModule),
+		slog.Int("module_count", len(req.Modules)),
+		slog.Int("dependency_count", depCount),
+		slog.Int("ttl_seconds", ttl),
+	)
 
 	return &models.Environment{
 		ID:             envID,
@@ -89,11 +184,19 @@ func SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.En
 }
 
 func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.ExecuteRequest) (*models.ExecutionResponse, error) {
+	log := logger.FromContext(ctx)
+
 	// Acquire semaphore
+	log.Debug("acquiring execution semaphore",
+		slog.String("environment_id", envID.String()),
+	)
 	select {
 	case execSemaphore <- struct{}{}:
 		defer func() { <-execSemaphore }()
 	case <-ctx.Done():
+		log.Warn("context cancelled while waiting for semaphore",
+			slog.String("environment_id", envID.String()),
+		)
 		return nil, ctx.Err()
 	}
 
@@ -107,8 +210,15 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 	`, envID).Scan(&volumeName, &mainModule, &metadataJSON)
 
 	if err == sql.ErrNoRows {
+		log.Warn("environment not found or not ready",
+			slog.String("environment_id", envID.String()),
+		)
 		return nil, fmt.Errorf("environment not found or not ready")
 	} else if err != nil {
+		log.Error("database query failed",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", err.Error()),
+		)
 		return nil, err
 	}
 
@@ -150,8 +260,21 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 
 	inputJSON, err := json.Marshal(executionInput)
 	if err != nil {
+		log.Error("failed to marshal execution input",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", err.Error()),
+		)
 		return nil, err
 	}
+
+	log.Debug("starting container execution",
+		slog.String("environment_id", envID.String()),
+		slog.String("execution_id", execID.String()),
+		slog.String("volume_name", volumeName),
+		slog.String("main_module", mainModule),
+		slog.Int("timeout_ms", timeoutMs),
+		slog.Int("memory_mb", memoryMb),
+	)
 
 	// 4. Build docker run command
 	args := []string{
@@ -164,7 +287,10 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 	if !IsGVisorDisabled() {
 		args = append(args, "--runtime=runsc")
 	} else {
-		log.Println("⚠️  WARNING: gVisor is DISABLED - execution is NOT sandboxed!")
+		log.Warn("gVisor is disabled - execution is not sandboxed",
+			slog.String("environment_id", envID.String()),
+			slog.String("execution_id", execID.String()),
+		)
 	}
 
 	// Continue with other args
@@ -175,6 +301,8 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 		"--cpus=0.5",
 		"--pids-limit=100",
 		"-v", fmt.Sprintf("%s:/workspace:ro", volumeName),
+		"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Mount cached dependencies
+		"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
 		"deno-runtime:latest",
 	)
 
@@ -195,7 +323,17 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
+			log.Debug("execution completed with non-zero exit",
+				slog.String("execution_id", execID.String()),
+				slog.Int("exit_code", exitCode),
+			)
 		} else if execCtx.Err() == context.DeadlineExceeded {
+			log.Warn("execution timeout exceeded",
+				slog.String("environment_id", envID.String()),
+				slog.String("execution_id", execID.String()),
+				slog.Int("timeout_ms", timeoutMs),
+				slog.Int64("duration_ms", duration.Milliseconds()),
+			)
 			return &models.ExecutionResponse{
 				ID:         execID,
 				ExitCode:   124,
@@ -203,6 +341,11 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 				DurationMs: duration.Milliseconds(),
 			}, nil
 		} else {
+			log.Error("execution failed",
+				slog.String("environment_id", envID.String()),
+				slog.String("execution_id", execID.String()),
+				slog.String("error", err.Error()),
+			)
 			return nil, fmt.Errorf("execution failed: %w", err)
 		}
 	}
@@ -234,20 +377,49 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 		resultJSON = stdoutStr
 	}
 
+	log.Debug("execution output parsed",
+		slog.String("execution_id", execID.String()),
+		slog.Bool("success", output.Success),
+		slog.Int("stdout_length", len(stdoutStr)),
+		slog.Int("stderr_length", len(stderrStr)),
+	)
+
 	// 8. Store execution record
-	database.DB.ExecContext(ctx, `
+	_, dbErr := database.DB.ExecContext(ctx, `
 		INSERT INTO executions
 		(id, environment_id, exit_code, stdout, stderr, duration_ms, completed_at)
 		VALUES ($1, $2, $3, $4, $5, $6, NOW())
 	`, execID, envID, exitCode, resultJSON, stderrStr, duration.Milliseconds())
 
+	if dbErr != nil {
+		log.Warn("failed to store execution record",
+			slog.String("execution_id", execID.String()),
+			slog.String("error", dbErr.Error()),
+		)
+	}
+
 	// 9. Update stats
-	database.DB.ExecContext(ctx, `
+	_, dbErr = database.DB.ExecContext(ctx, `
 		UPDATE environments
 		SET execution_count = execution_count + 1,
 			last_executed_at = NOW()
 		WHERE id = $1
 	`, envID)
+
+	if dbErr != nil {
+		log.Warn("failed to update environment stats",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", dbErr.Error()),
+		)
+	}
+
+	log.Info("execution completed",
+		slog.String("environment_id", envID.String()),
+		slog.String("execution_id", execID.String()),
+		slog.Int("exit_code", exitCode),
+		slog.Int64("duration_ms", duration.Milliseconds()),
+		slog.Bool("success", exitCode == 0),
+	)
 
 	return &models.ExecutionResponse{
 		ID:         execID,
@@ -259,17 +431,190 @@ func ExecuteInEnvironment(ctx context.Context, envID uuid.UUID, req *models.Exec
 }
 
 func DeleteEnvironment(ctx context.Context, envID uuid.UUID) error {
+	log := logger.FromContext(ctx)
+
 	// Get volume name
 	var volumeName string
 	err := database.DB.QueryRowContext(ctx, "SELECT volume_name FROM environments WHERE id = $1", envID).Scan(&volumeName)
 	if err != nil {
+		log.Error("failed to find environment for deletion",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", err.Error()),
+		)
 		return err
 	}
 
+	log.Debug("deleting environment",
+		slog.String("environment_id", envID.String()),
+		slog.String("volume_name", volumeName),
+	)
+
 	// Remove volume
-	exec.Command("docker", "volume", "rm", "-f", volumeName).Run()
+	if err := exec.Command("docker", "volume", "rm", "-f", volumeName).Run(); err != nil {
+		log.Warn("failed to remove docker volume",
+			slog.String("volume_name", volumeName),
+			slog.String("error", err.Error()),
+		)
+	}
 
 	// Delete from DB (cascades to executions)
 	_, err = database.DB.ExecContext(ctx, "DELETE FROM environments WHERE id = $1", envID)
-	return err
+	if err != nil {
+		log.Error("failed to delete environment from database",
+			slog.String("environment_id", envID.String()),
+			slog.String("error", err.Error()),
+		)
+		return err
+	}
+
+	log.Info("environment deleted",
+		slog.String("environment_id", envID.String()),
+		slog.String("volume_name", volumeName),
+	)
+
+	return nil
+}
+
+// streamingWriter wraps a logger to stream output line by line
+type streamingWriter struct {
+	log    *slog.Logger
+	stream string // "stdout" or "stderr"
+	buffer []byte
+}
+
+func (w *streamingWriter) Write(p []byte) (n int, err error) {
+	w.buffer = append(w.buffer, p...)
+
+	// Process complete lines
+	for {
+		idx := bytes.IndexByte(w.buffer, '\n')
+		if idx == -1 {
+			break
+		}
+
+		line := string(w.buffer[:idx])
+		w.buffer = w.buffer[idx+1:]
+
+		if line != "" {
+			w.log.Info("dependency install",
+				slog.String("stream", w.stream),
+				slog.String("output", line),
+			)
+		}
+	}
+
+	return len(p), nil
+}
+
+func (w *streamingWriter) Flush() {
+	// Flush any remaining content
+	if len(w.buffer) > 0 {
+		w.log.Info("dependency install",
+			slog.String("stream", w.stream),
+			slog.String("output", string(w.buffer)),
+		)
+		w.buffer = nil
+	}
+}
+
+// installDependencies caches dependencies in the volume with network access
+func installDependencies(ctx context.Context, volumeName string, deps *models.Dependencies) error {
+	if deps == nil {
+		return nil
+	}
+
+	log := logger.FromContext(ctx)
+
+	// Build deno cache commands
+	var cacheCommands []string
+
+	// Cache npm dependencies
+	if len(deps.NPM) > 0 {
+		log.Info("preparing npm dependencies",
+			slog.Any("packages", deps.NPM),
+		)
+		for _, pkg := range deps.NPM {
+			cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache --node-modules-dir npm:%s", pkg))
+		}
+	}
+
+	// Cache deno dependencies
+	if len(deps.Deno) > 0 {
+		log.Info("preparing deno dependencies",
+			slog.Any("modules", deps.Deno),
+		)
+		for _, url := range deps.Deno {
+			cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache %s", url))
+		}
+	}
+
+	if len(cacheCommands) == 0 {
+		log.Debug("no dependencies to install")
+		return nil
+	}
+
+	// Join commands with && for sequential execution
+	cacheScript := strings.Join(cacheCommands, " && ")
+
+	log.Info("starting dependency installation",
+		slog.String("volume_name", volumeName),
+		slog.Int("command_count", len(cacheCommands)),
+		slog.String("script", cacheScript),
+	)
+
+	// Build docker command
+	// Note: Must override entrypoint since the image defaults to running runner.ts
+	dockerArgs := []string{
+		"run", "--rm",
+		"--entrypoint", "sh", // Override entrypoint to run shell commands
+		"--network=bridge",   // Network ENABLED for dependency download
+		"-v", fmt.Sprintf("%s:/workspace", volumeName),
+		"-v", fmt.Sprintf("%s:/deno-dir", volumeName), // Cache in volume
+		"-e", "DENO_DIR=/deno-dir",
+		"-w", "/workspace",
+		"deno-runtime:latest",
+		"-c", cacheScript,
+	}
+
+	// Run dependency installation with streaming output
+	startTime := time.Now()
+	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
+
+	// Create streaming writers that log output in real-time
+	stdoutWriter := &streamingWriter{log: log, stream: "stdout"}
+	stderrWriter := &streamingWriter{log: log, stream: "stderr"}
+
+	// Also capture full output for error reporting
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(stdoutWriter, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(stderrWriter, &stderrBuf)
+
+	err := cmd.Run()
+
+	// Flush any remaining buffered output
+	stdoutWriter.Flush()
+	stderrWriter.Flush()
+
+	duration := time.Since(startTime)
+
+	if err != nil {
+		log.Error("dependency installation failed",
+			slog.String("volume_name", volumeName),
+			slog.String("error", err.Error()),
+			slog.Int64("duration_ms", duration.Milliseconds()),
+		)
+		// Include both stdout and stderr in error for debugging
+		combinedOutput := stderrBuf.String()
+		if combinedOutput == "" {
+			combinedOutput = stdoutBuf.String()
+		}
+		return fmt.Errorf("dependency installation failed: %w - output: %s", err, combinedOutput)
+	}
+
+	log.Info("dependency installation completed",
+		slog.String("volume_name", volumeName),
+		slog.Int64("duration_ms", duration.Milliseconds()),
+	)
+
+	return nil
 }

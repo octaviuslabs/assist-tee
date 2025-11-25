@@ -3,10 +3,12 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/jsfour/assist-tee/internal/logger"
 )
 
 var DB *sql.DB
@@ -18,6 +20,13 @@ func Connect() error {
 	password := getEnv("DB_PASSWORD", "tee")
 	dbname := getEnv("DB_NAME", "tee")
 
+	logger.Log.Info("connecting to database",
+		slog.String("host", host),
+		slog.String("port", port),
+		slog.String("user", user),
+		slog.String("database", dbname),
+	)
+
 	connStr := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, password, dbname,
@@ -26,26 +35,61 @@ func Connect() error {
 	var err error
 	DB, err = sql.Open("postgres", connStr)
 	if err != nil {
+		logger.Log.Error("failed to open database connection",
+			slog.String("error", err.Error()),
+		)
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Configure connection pool
+	DB.SetMaxOpenConns(25)
+	DB.SetMaxIdleConns(5)
+	DB.SetConnMaxLifetime(5 * time.Minute)
+
 	// Test connection with retries
+	logger.Log.Debug("testing database connection with retries",
+		slog.Int("max_retries", 30),
+	)
+
+	var lastErr error
 	for i := 0; i < 30; i++ {
 		err = DB.Ping()
 		if err == nil {
+			logger.Log.Info("database connection established",
+				slog.Int("attempts", i+1),
+			)
 			break
 		}
+		lastErr = err
+		logger.Log.Debug("database ping failed, retrying",
+			slog.Int("attempt", i+1),
+			slog.String("error", err.Error()),
+		)
 		time.Sleep(1 * time.Second)
 	}
 
-	if err != nil {
+	if lastErr != nil && err != nil {
+		logger.Log.Error("failed to connect to database after retries",
+			slog.String("error", err.Error()),
+		)
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
+
+	// Log connection pool stats
+	stats := DB.Stats()
+	logger.Log.Debug("database connection pool configured",
+		slog.Int("max_open_connections", stats.MaxOpenConnections),
+		slog.Int("open_connections", stats.OpenConnections),
+		slog.Int("in_use", stats.InUse),
+		slog.Int("idle", stats.Idle),
+	)
 
 	return nil
 }
 
 func InitSchema() error {
+	logger.Log.Info("initializing database schema")
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS environments (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -79,7 +123,33 @@ func InitSchema() error {
 	`
 
 	_, err := DB.Exec(schema)
-	return err
+	if err != nil {
+		logger.Log.Error("failed to initialize database schema",
+			slog.String("error", err.Error()),
+		)
+		return err
+	}
+
+	logger.Log.Info("database schema initialized")
+	return nil
+}
+
+// LogStats logs current database connection pool statistics
+func LogStats() {
+	if DB == nil {
+		return
+	}
+	stats := DB.Stats()
+	logger.Log.Info("database connection pool stats",
+		slog.Int("max_open_connections", stats.MaxOpenConnections),
+		slog.Int("open_connections", stats.OpenConnections),
+		slog.Int("in_use", stats.InUse),
+		slog.Int("idle", stats.Idle),
+		slog.Int64("wait_count", stats.WaitCount),
+		slog.Duration("wait_duration", stats.WaitDuration),
+		slog.Int64("max_idle_closed", stats.MaxIdleClosed),
+		slog.Int64("max_lifetime_closed", stats.MaxLifetimeClosed),
+	)
 }
 
 func getEnv(key, defaultValue string) string {

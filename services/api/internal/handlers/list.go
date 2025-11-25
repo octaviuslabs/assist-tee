@@ -2,21 +2,31 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/jsfour/assist-tee/internal/database"
+	"github.com/jsfour/assist-tee/internal/logger"
 	"github.com/jsfour/assist-tee/internal/models"
 )
 
 func HandleList(w http.ResponseWriter, r *http.Request) {
-	rows, err := database.DB.Query(`
+	ctx := r.Context()
+	log := logger.FromContext(ctx)
+
+	log.Debug("list environments request received")
+
+	rows, err := database.DB.QueryContext(ctx, `
 		SELECT id, volume_name, main_module, created_at, last_executed_at,
 		       execution_count, status, metadata, ttl_seconds
 		FROM environments
 		ORDER BY created_at DESC
 	`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Error("failed to query environments",
+			slog.String("error", err.Error()),
+		)
+		writeErrorWithCode(w, http.StatusInternalServerError, "query_failed", err.Error())
 		return
 	}
 	defer rows.Close()
@@ -31,6 +41,9 @@ func HandleList(w http.ResponseWriter, r *http.Request) {
 			&metadataJSON, &env.TTLSeconds,
 		)
 		if err != nil {
+			log.Warn("failed to scan environment row",
+				slog.String("error", err.Error()),
+			)
 			continue
 		}
 		if metadataJSON != nil {
@@ -39,6 +52,9 @@ func HandleList(w http.ResponseWriter, r *http.Request) {
 		envs = append(envs, env)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(envs)
+	log.Info("environments listed",
+		slog.Int("count", len(envs)),
+	)
+
+	writeJSON(w, http.StatusOK, envs)
 }

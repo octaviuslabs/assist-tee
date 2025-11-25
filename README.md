@@ -34,7 +34,10 @@ assist-tee/
 │   ├── design.md               # Architecture documentation
 │   ├── GVISOR.md               # gVisor security configuration
 │   ├── BUILD.md                # Build and compilation guide
-│   └── TYPESCRIPT_EXAMPLES.md  # TypeScript usage examples
+│   ├── TYPESCRIPT_EXAMPLES.md  # TypeScript usage examples
+│   ├── DEPENDENCIES.md         # External dependency management
+│   ├── TESTING.md              # Testing guide
+│   └── SECURITY.md             # Security model
 ├── examples/                   # Example user code
 │   ├── main.ts
 │   └── utils.ts
@@ -106,6 +109,26 @@ curl -X POST http://localhost:8080/environments/setup \
     "ttlSeconds": 3600
   }'
 ```
+
+**With external dependencies:**
+
+```bash
+curl -X POST http://localhost:8080/environments/setup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mainModule": "main.ts",
+    "modules": {
+      "main.ts": "import { format } from \"npm:date-fns@3\";\nexport async function handler(event, context) {\n  return { formatted: format(new Date(), \"PPP\") };\n}"
+    },
+    "dependencies": {
+      "npm": ["date-fns@3"],
+      "deno": ["https://deno.land/std@0.224.0/async/delay.ts"]
+    },
+    "ttlSeconds": 3600
+  }'
+```
+
+Dependencies are downloaded during setup (with network) and cached for execution (without network). See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for details.
 
 Response:
 ```json
@@ -195,19 +218,46 @@ export function add(a: number, b: number): number {
 }
 ```
 
-## Testing with Example Code
+## Testing
+
+### Quick Test
 
 ```bash
-# Run the full test flow
+# Run basic functionality test
 ./scripts/test-full-flow.sh
 ```
 
-This will:
-1. ✓ Check API health
-2. ✓ Create an execution environment
-3. ✓ Run code twice (reusing the environment)
-4. ✓ List environments
-5. ✓ Clean up
+### Complete Security Test Suite
+
+```bash
+# Run all security and sandboxing tests
+./scripts/test-all-security.sh
+```
+
+This runs 5 comprehensive test suites:
+1. ✓ **Basic functionality** - Environment setup, execution, cleanup
+2. ✓ **Network sandboxing** - HTTP, DNS, WebSocket blocking
+3. ✓ **Filesystem sandboxing** - Read/write restrictions, command blocking
+4. ✓ **Deno permissions** - All permission flags (net, read, write, run, ffi, hrtime)
+5. ✓ **Dependency handling** - Local vs remote imports, npm packages
+
+### Individual Test Suites
+
+```bash
+# Test network isolation
+./scripts/test-network-sandbox.sh
+
+# Test filesystem restrictions
+./scripts/test-filesystem-sandbox.sh
+
+# Test Deno permissions
+./scripts/test-permissions.sh
+
+# Test dependency handling
+./scripts/test-dependencies.sh
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for detailed testing documentation.
 
 ## Architecture
 

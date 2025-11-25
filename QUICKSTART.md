@@ -70,8 +70,10 @@ curl http://localhost:8080/health
 
 ## Step 3: Test It
 
+### Quick Test
+
 ```bash
-# Run the full test flow
+# Run basic functionality test
 ./scripts/test-full-flow.sh
 ```
 
@@ -82,12 +84,20 @@ This will:
 4. ✓ List environments
 5. ✓ Clean up
 
-You should see:
+### Complete Security Test (Optional)
+
+```bash
+# Run all security tests (network, filesystem, permissions, dependencies)
+./scripts/test-all-security.sh
 ```
-=========================================
-All tests passed! ✓
-=========================================
-```
+
+This runs 5 test suites demonstrating:
+- Network isolation (HTTP, DNS, WebSocket blocked)
+- Filesystem sandboxing (read/write restrictions)
+- Deno permissions (all restricted)
+- Dependency handling (local vs remote)
+
+See [docs/TESTING.md](docs/TESTING.md) for details.
 
 ## Step 4: Create Your Own Environment
 

@@ -18,11 +18,17 @@ type Environment struct {
 	TTLSeconds     int                    `json:"ttlSeconds"`
 }
 
+type Dependencies struct {
+	NPM  []string `json:"npm,omitempty"`  // npm packages: ["pkg@version"]
+	Deno []string `json:"deno,omitempty"` // deno URLs: ["https://..."]
+}
+
 type SetupRequest struct {
-	MainModule  string            `json:"mainModule"`
-	Modules     map[string]string `json:"modules"`
-	Permissions *Permissions      `json:"permissions,omitempty"`
-	TTLSeconds  int               `json:"ttlSeconds,omitempty"`
+	MainModule   string            `json:"mainModule"`
+	Modules      map[string]string `json:"modules"`
+	Dependencies *Dependencies     `json:"dependencies,omitempty"`
+	Permissions  *Permissions      `json:"permissions,omitempty"`
+	TTLSeconds   int               `json:"ttlSeconds,omitempty"`
 }
 
 type ExecuteRequest struct {

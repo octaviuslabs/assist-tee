@@ -6,11 +6,11 @@ help: ## Show this help message
 	@echo 'Available targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build-api: ## Build the API service image
-	cd services/api && docker build -t tee-api:latest .
+build-api: ## Build the API service image for native platform
+	cd services/api && docker build --platform linux/arm64 -t tee-api:latest .
 
-build-runtime: ## Build the Deno runtime image
-	cd services/runtime && docker build -t deno-runtime:latest .
+build-runtime: ## Build the Deno runtime image for native platform
+	cd services/runtime && docker build --platform linux/arm64 -t deno-runtime:latest .
 
 build: build-runtime build-api ## Build all service images
 

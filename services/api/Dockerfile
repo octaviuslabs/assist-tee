@@ -1,6 +1,7 @@
 # Build stage
 FROM golang:1.22-alpine AS builder
 
+ARG TARGETARCH
 WORKDIR /app
 
 # Copy go mod files
@@ -11,8 +12,8 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o /tee-api ./cmd/api
+# Build the application for target architecture
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /tee-api ./cmd/api
 
 # Runtime stage
 FROM alpine:latest
