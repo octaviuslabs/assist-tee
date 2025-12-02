@@ -13,7 +13,7 @@
       };
     in {
       devShell.x86_64-darwin = pkgsM1.mkShell {
-        name = "ardis-environment";
+        name = "olabs-environment";
         buildInputs = [
           pkgsM1.nodejs_22
           pkgsM1.pnpm
