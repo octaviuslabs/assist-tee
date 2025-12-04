@@ -10,6 +10,7 @@ type Environment struct {
 	ID             uuid.UUID              `json:"id"`
 	VolumeName     string                 `json:"volumeName"`
 	MainModule     string                 `json:"mainModule"`
+	Runtime        Runtime                `json:"runtime"`
 	CreatedAt      time.Time              `json:"createdAt"`
 	LastExecutedAt *time.Time             `json:"lastExecutedAt,omitempty"`
 	ExecutionCount int                    `json:"executionCount"`
@@ -18,14 +19,22 @@ type Environment struct {
 	TTLSeconds     int                    `json:"ttlSeconds"`
 }
 
+type Runtime string
+
+const (
+	RuntimeDeno Runtime = "deno"
+	RuntimeBun  Runtime = "bun"
+)
+
 type Dependencies struct {
 	NPM  []string `json:"npm,omitempty"`  // npm packages: ["pkg@version"]
-	Deno []string `json:"deno,omitempty"` // deno URLs: ["https://..."]
+	Deno []string `json:"deno,omitempty"` // deno URLs: ["https://..."] (deno runtime only)
 }
 
 type SetupRequest struct {
 	MainModule   string            `json:"mainModule"`
 	Modules      map[string]string `json:"modules"`
+	Runtime      Runtime           `json:"runtime,omitempty"` // "deno" (default) or "bun"
 	Dependencies *Dependencies     `json:"dependencies,omitempty"`
 	Permissions  *Permissions      `json:"permissions,omitempty"`
 	TTLSeconds   int               `json:"ttlSeconds,omitempty"`

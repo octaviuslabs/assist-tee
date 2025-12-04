@@ -1,16 +1,21 @@
-.PHONY: help build build-api build-runtime run stop clean test-setup test-execute logs
+.PHONY: help build build-api build-runtime build-runtime-deno build-runtime-bun run stop clean test-setup test-setup-bun test-execute logs
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
 	@echo 'Available targets:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build-api: ## Build the API service image for native platform
 	cd services/api && docker build --platform linux/arm64 -t tee-api:latest .
 
-build-runtime: ## Build the Deno runtime image for native platform
+build-runtime-deno: ## Build the Deno runtime image for native platform
 	cd services/runtime && docker build --platform linux/arm64 -t deno-runtime:latest .
+
+build-runtime-bun: ## Build the Bun runtime image for native platform
+	cd services/runtime-bun && docker build --platform linux/arm64 -t bun-runtime:latest .
+
+build-runtime: build-runtime-deno build-runtime-bun ## Build all runtime images
 
 build: build-runtime build-api ## Build all service images
 
@@ -47,11 +52,18 @@ logs: ## Follow logs from all services
 logs-api: ## Follow logs from API service only
 	docker-compose logs -f tee-api
 
-test-setup: ## Test creating an environment
-	@echo "Creating test environment..."
+test-setup: ## Test creating an environment (Deno runtime)
+	@echo "Creating test environment (Deno)..."
 	@curl -X POST http://localhost:8080/environments/setup \
 		-H "Content-Type: application/json" \
 		-d '{"mainModule":"main.ts","modules":{"main.ts":"export async function handler(event,context){return {sum:event.data.a+event.data.b,executionId:context.executionId};}"},"ttlSeconds":3600}' \
+		| jq
+
+test-setup-bun: ## Test creating an environment (Bun runtime)
+	@echo "Creating test environment (Bun)..."
+	@curl -X POST http://localhost:8080/environments/setup \
+		-H "Content-Type: application/json" \
+		-d '{"mainModule":"main.ts","runtime":"bun","modules":{"main.ts":"export async function handler(event,context){return {sum:event.data.a+event.data.b,executionId:context.executionId};}"},"ttlSeconds":3600}' \
 		| jq
 
 test-execute: ## Execute in an environment (set ENV_ID first)

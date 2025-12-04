@@ -21,12 +21,34 @@ import (
 
 var execSemaphore = make(chan struct{}, 50) // Max 50 concurrent executions
 
-// RuntimeImage returns the Docker image to use for code execution
-func RuntimeImage() string {
-	if img := os.Getenv("RUNTIME_IMAGE"); img != "" {
-		return img
+// RuntimeImage returns the Docker image to use for code execution based on runtime type
+func RuntimeImage(runtime models.Runtime) string {
+	switch runtime {
+	case models.RuntimeBun:
+		if img := os.Getenv("RUNTIME_IMAGE_BUN"); img != "" {
+			return img
+		}
+		return "octaviusdeployment/assist-tee-rt-bun:latest"
+	default: // deno is the default
+		if img := os.Getenv("RUNTIME_IMAGE_DENO"); img != "" {
+			return img
+		}
+		// Also check legacy RUNTIME_IMAGE for backwards compatibility
+		if img := os.Getenv("RUNTIME_IMAGE"); img != "" {
+			return img
+		}
+		return "octaviusdeployment/assist-tee-rt-deno:latest"
 	}
-	return "octaviusdeployment/assist-tee-rt-deno:latest"
+}
+
+// RuntimeUserID returns the UID of the user in the runtime container
+func RuntimeUserID(runtime models.Runtime) string {
+	switch runtime {
+	case models.RuntimeBun:
+		return "1000" // bun user in oven/bun image
+	default:
+		return "1000" // deno user in denoland/deno image
+	}
 }
 
 // IsGVisorDisabled checks if gVisor is disabled via environment variable
@@ -39,10 +61,17 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 	volumeName := fmt.Sprintf("tee-env-%s", envID.String())
 	log := logger.FromContext(ctx)
 
+	// Default to deno runtime if not specified
+	runtime := req.Runtime
+	if runtime == "" {
+		runtime = models.RuntimeDeno
+	}
+
 	log.Debug("starting environment setup",
 		slog.String("environment_id", envID.String()),
 		slog.String("volume_name", volumeName),
 		slog.String("main_module", req.MainModule),
+		slog.String("runtime", string(runtime)),
 		slog.Int("module_count", len(req.Modules)),
 	)
 
@@ -88,12 +117,15 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		}
 	}
 
-	// 2b. Fix ownership for deno user (UID 1000 in the deno image)
-	log.Debug("setting volume ownership for deno user")
+	// 2b. Fix ownership for runtime user (UID 1000 in both deno and bun images)
+	log.Debug("setting volume ownership for runtime user",
+		slog.String("runtime", string(runtime)),
+		slog.String("uid", RuntimeUserID(runtime)),
+	)
 	chownCmd := exec.CommandContext(ctx, "docker", "run", "--rm",
 		"-v", fmt.Sprintf("%s:/workspace", volumeName),
 		"busybox:latest",
-		"sh", "-c", "chown -R 1000:1000 /workspace",
+		"sh", "-c", fmt.Sprintf("chown -R %s:%s /workspace", RuntimeUserID(runtime), RuntimeUserID(runtime)),
 	)
 	if err := chownCmd.Run(); err != nil {
 		log.Warn("failed to set volume ownership",
@@ -111,12 +143,13 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		depCount := len(req.Dependencies.NPM) + len(req.Dependencies.Deno)
 		log.Info("installing dependencies",
 			slog.String("environment_id", envID.String()),
+			slog.String("runtime", string(runtime)),
 			slog.Int("npm_count", len(req.Dependencies.NPM)),
 			slog.Int("deno_count", len(req.Dependencies.Deno)),
 			slog.Int("total_count", depCount),
 		)
 
-		if err := installDependencies(ctx, volumeName, req.Dependencies); err != nil {
+		if err := installDependencies(ctx, volumeName, req.Dependencies, runtime); err != nil {
 			log.Error("dependency installation failed",
 				slog.String("environment_id", envID.String()),
 				slog.String("error", err.Error()),
@@ -147,18 +180,20 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		"moduleCount":     len(req.Modules),
 		"dependencyCount": depCount,
 		"hasDependencies": depCount > 0,
+		"runtime":         string(runtime),
 	}
 	metadataJSON, _ := json.Marshal(metadata)
 
 	log.Debug("storing environment metadata",
 		slog.String("environment_id", envID.String()),
+		slog.String("runtime", string(runtime)),
 		slog.Int("ttl_seconds", ttl),
 	)
 
 	_, err := database.DB.ExecContext(ctx, `
-		INSERT INTO environments (id, volume_name, main_module, metadata, ttl_seconds)
-		VALUES ($1, $2, $3, $4, $5)
-	`, envID, volumeName, req.MainModule, metadataJSON, ttl)
+		INSERT INTO environments (id, volume_name, main_module, runtime, metadata, ttl_seconds)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, envID, volumeName, req.MainModule, string(runtime), metadataJSON, ttl)
 
 	if err != nil {
 		log.Error("failed to store environment in database",
@@ -174,6 +209,7 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		slog.String("environment_id", envID.String()),
 		slog.String("volume_name", volumeName),
 		slog.String("main_module", req.MainModule),
+		slog.String("runtime", string(runtime)),
 		slog.Int("module_count", len(req.Modules)),
 		slog.Int("dependency_count", depCount),
 		slog.Int("ttl_seconds", ttl),
@@ -183,6 +219,7 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		ID:             envID,
 		VolumeName:     volumeName,
 		MainModule:     req.MainModule,
+		Runtime:        runtime,
 		CreatedAt:      time.Now(),
 		ExecutionCount: 0,
 		Status:         "ready",
@@ -210,12 +247,13 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 
 	// 1. Look up environment
 	var volumeName, mainModule string
+	var runtimeStr sql.NullString
 	var metadataJSON []byte
 	err := database.DB.QueryRowContext(ctx, `
-		SELECT volume_name, main_module, metadata
+		SELECT volume_name, main_module, runtime, metadata
 		FROM environments
 		WHERE id = $1 AND status = 'ready'
-	`, envID).Scan(&volumeName, &mainModule, &metadataJSON)
+	`, envID).Scan(&volumeName, &mainModule, &runtimeStr, &metadataJSON)
 
 	if err == sql.ErrNoRows {
 		log.Warn("environment not found or not ready",
@@ -228,6 +266,12 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 			slog.String("error", err.Error()),
 		)
 		return nil, err
+	}
+
+	// Parse runtime, default to deno for backwards compatibility
+	runtime := models.RuntimeDeno
+	if runtimeStr.Valid && runtimeStr.String != "" {
+		runtime = models.Runtime(runtimeStr.String)
 	}
 
 	// Parse metadata for permissions
@@ -280,6 +324,7 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		slog.String("execution_id", execID.String()),
 		slog.String("volume_name", volumeName),
 		slog.String("main_module", mainModule),
+		slog.String("runtime", string(runtime)),
 		slog.Int("timeout_ms", timeoutMs),
 		slog.Int("memory_mb", memoryMb),
 	)
@@ -309,10 +354,22 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		"--cpus=0.5",
 		"--pids-limit=100",
 		"-v", fmt.Sprintf("%s:/workspace:ro", volumeName),
-		"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Mount cached dependencies
-		"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
-		RuntimeImage(),
 	)
+
+	// Add runtime-specific cache directory mounts and environment variables
+	switch runtime {
+	case models.RuntimeBun:
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/home/bun/.bun:ro", volumeName), // Bun cache location
+		)
+	default: // deno
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Deno cache location
+			"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
+		)
+	}
+
+	args = append(args, RuntimeImage(runtime))
 
 	// 5. Execute with stdin
 	startTime := time.Now()
@@ -564,62 +621,106 @@ func (w *streamingWriter) Flush() {
 }
 
 // installDependencies caches dependencies in the volume with network access
-func installDependencies(ctx context.Context, volumeName string, deps *models.Dependencies) error {
+func installDependencies(ctx context.Context, volumeName string, deps *models.Dependencies, runtime models.Runtime) error {
 	if deps == nil {
 		return nil
 	}
 
 	log := logger.FromContext(ctx)
 
-	// Build deno cache commands
 	var cacheCommands []string
+	var dockerArgs []string
 
-	// Cache npm dependencies
-	if len(deps.NPM) > 0 {
-		log.Info("preparing npm dependencies",
-			slog.Any("packages", deps.NPM),
-		)
-		for _, pkg := range deps.NPM {
-			cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache --node-modules-dir npm:%s", pkg))
+	switch runtime {
+	case models.RuntimeBun:
+		// Build bun install commands
+		if len(deps.NPM) > 0 {
+			log.Info("preparing npm dependencies for bun",
+				slog.Any("packages", deps.NPM),
+			)
+			// Bun can install all packages at once
+			cacheCommands = append(cacheCommands, fmt.Sprintf("bun install %s", strings.Join(deps.NPM, " ")))
 		}
-	}
 
-	// Cache deno dependencies
-	if len(deps.Deno) > 0 {
-		log.Info("preparing deno dependencies",
-			slog.Any("modules", deps.Deno),
-		)
-		for _, url := range deps.Deno {
-			cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache %s", url))
+		// Deno-specific URLs are not supported in bun
+		if len(deps.Deno) > 0 {
+			log.Warn("deno dependencies are not supported in bun runtime, ignoring",
+				slog.Any("modules", deps.Deno),
+			)
 		}
-	}
 
-	if len(cacheCommands) == 0 {
-		log.Debug("no dependencies to install")
-		return nil
-	}
+		if len(cacheCommands) == 0 {
+			log.Debug("no dependencies to install")
+			return nil
+		}
 
-	// Join commands with && for sequential execution
-	cacheScript := strings.Join(cacheCommands, " && ")
+		cacheScript := strings.Join(cacheCommands, " && ")
 
-	log.Info("starting dependency installation",
-		slog.String("volume_name", volumeName),
-		slog.Int("command_count", len(cacheCommands)),
-		slog.String("script", cacheScript),
-	)
+		log.Info("starting dependency installation",
+			slog.String("volume_name", volumeName),
+			slog.String("runtime", string(runtime)),
+			slog.Int("command_count", len(cacheCommands)),
+			slog.String("script", cacheScript),
+		)
 
-	// Build docker command
-	// Note: Must override entrypoint since the image defaults to running runner.ts
-	dockerArgs := []string{
-		"run", "--rm",
-		"--entrypoint", "sh", // Override entrypoint to run shell commands
-		"--network=bridge",   // Network ENABLED for dependency download
-		"-v", fmt.Sprintf("%s:/workspace", volumeName),
-		"-v", fmt.Sprintf("%s:/deno-dir", volumeName), // Cache in volume
-		"-e", "DENO_DIR=/deno-dir",
-		"-w", "/workspace",
-		RuntimeImage(),
-		"-c", cacheScript,
+		// Build docker command for bun
+		dockerArgs = []string{
+			"run", "--rm",
+			"--entrypoint", "sh",
+			"--network=bridge",
+			"-v", fmt.Sprintf("%s:/workspace", volumeName),
+			"-w", "/workspace",
+			RuntimeImage(runtime),
+			"-c", cacheScript,
+		}
+
+	default: // deno
+		// Build deno cache commands
+		if len(deps.NPM) > 0 {
+			log.Info("preparing npm dependencies",
+				slog.Any("packages", deps.NPM),
+			)
+			for _, pkg := range deps.NPM {
+				cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache --node-modules-dir npm:%s", pkg))
+			}
+		}
+
+		// Cache deno dependencies
+		if len(deps.Deno) > 0 {
+			log.Info("preparing deno dependencies",
+				slog.Any("modules", deps.Deno),
+			)
+			for _, url := range deps.Deno {
+				cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache %s", url))
+			}
+		}
+
+		if len(cacheCommands) == 0 {
+			log.Debug("no dependencies to install")
+			return nil
+		}
+
+		cacheScript := strings.Join(cacheCommands, " && ")
+
+		log.Info("starting dependency installation",
+			slog.String("volume_name", volumeName),
+			slog.String("runtime", string(runtime)),
+			slog.Int("command_count", len(cacheCommands)),
+			slog.String("script", cacheScript),
+		)
+
+		// Build docker command for deno
+		dockerArgs = []string{
+			"run", "--rm",
+			"--entrypoint", "sh",
+			"--network=bridge",
+			"-v", fmt.Sprintf("%s:/workspace", volumeName),
+			"-v", fmt.Sprintf("%s:/deno-dir", volumeName),
+			"-e", "DENO_DIR=/deno-dir",
+			"-w", "/workspace",
+			RuntimeImage(runtime),
+			"-c", cacheScript,
+		}
 	}
 
 	// Run dependency installation with streaming output
@@ -646,6 +747,7 @@ func installDependencies(ctx context.Context, volumeName string, deps *models.De
 	if err != nil {
 		log.Error("dependency installation failed",
 			slog.String("volume_name", volumeName),
+			slog.String("runtime", string(runtime)),
 			slog.String("error", err.Error()),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 		)
@@ -659,6 +761,7 @@ func installDependencies(ctx context.Context, volumeName string, deps *models.De
 
 	log.Info("dependency installation completed",
 		slog.String("volume_name", volumeName),
+		slog.String("runtime", string(runtime)),
 		slog.Int64("duration_ms", duration.Milliseconds()),
 	)
 
