@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/jsfour/assist-tee/internal/logger"
 	"github.com/jsfour/assist-tee/internal/models"
 )
+
+const maxExecuteBodySize = 1 << 20 // 1 MB for execute
 
 func (s *Server) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -26,8 +29,19 @@ func (s *Server) HandleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxExecuteBodySize)
+
 	var req models.ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			log.Warn("request body too large",
+				slog.String("environment_id", envID.String()),
+				slog.Int64("limit", maxExecuteBodySize),
+			)
+			writeErrorWithCode(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds 1 MB limit")
+			return
+		}
 		log.Warn("failed to decode execute request",
 			slog.String("environment_id", envID.String()),
 			slog.String("error", err.Error()),

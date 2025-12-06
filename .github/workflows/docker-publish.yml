@@ -10,7 +10,8 @@ on:
 env:
   REGISTRY: docker.io
   API_IMAGE: octaviusdeployment/assist-tee-api
-  RUNTIME_IMAGE: octaviusdeployment/assist-tee-rt-deno
+  RUNTIME_DENO_IMAGE: octaviusdeployment/assist-tee-rt-deno
+  RUNTIME_BUN_IMAGE: octaviusdeployment/assist-tee-rt-bun
 
 jobs:
   build-and-push:
@@ -49,11 +50,24 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Extract metadata for Runtime image
-        id: meta-runtime
+      - name: Extract metadata for Deno Runtime image
+        id: meta-runtime-deno
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.RUNTIME_IMAGE }}
+          images: ${{ env.RUNTIME_DENO_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Extract metadata for Bun Runtime image
+        id: meta-runtime-bun
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.RUNTIME_BUN_IMAGE }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -74,16 +88,29 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Runtime image - needed by API to spawn execution containers
-      - name: Build and push Runtime image
+      # Deno Runtime image - needed by API to spawn execution containers
+      - name: Build and push Deno Runtime image
         uses: docker/build-push-action@v5
         with:
           context: ./services/runtime
           file: ./services/runtime/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-runtime.outputs.tags }}
-          labels: ${{ steps.meta-runtime.outputs.labels }}
+          tags: ${{ steps.meta-runtime-deno.outputs.tags }}
+          labels: ${{ steps.meta-runtime-deno.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Bun Runtime image - alternative runtime for execution containers
+      - name: Build and push Bun Runtime image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/runtime-bun
+          file: ./services/runtime-bun/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-runtime-bun.outputs.tags }}
+          labels: ${{ steps.meta-runtime-bun.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -39,6 +39,9 @@ services:
       - DB_PASSWORD=tee
       - DB_NAME=tee
       - LOG_LEVEL=debug
+      # Runtime images - supports both deno (default) and bun
+      # - RUNTIME_IMAGE_DENO=octaviusdeployment/assist-tee-rt-deno:latest
+      # - RUNTIME_IMAGE_BUN=octaviusdeployment/assist-tee-rt-bun:latest
       # ⚠️ DISABLE gVisor for development on non-Linux systems
       - DISABLE_GVISOR=true
     depends_on:

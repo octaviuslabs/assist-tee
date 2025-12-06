@@ -95,6 +95,7 @@ func InitSchema() error {
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		volume_name VARCHAR(255) NOT NULL UNIQUE,
 		main_module VARCHAR(255) NOT NULL,
+		runtime VARCHAR(50) NOT NULL DEFAULT 'deno',
 		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 		last_executed_at TIMESTAMP,
 		execution_count INTEGER NOT NULL DEFAULT 0,
@@ -106,6 +107,15 @@ func InitSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_environments_created_at ON environments(created_at);
 	CREATE INDEX IF NOT EXISTS idx_environments_last_executed_at ON environments(last_executed_at);
 	CREATE INDEX IF NOT EXISTS idx_environments_status ON environments(status);
+	CREATE INDEX IF NOT EXISTS idx_environments_runtime ON environments(runtime);
+
+	-- Migration: Add runtime column if it doesn't exist (for existing installations)
+	DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+		               WHERE table_name='environments' AND column_name='runtime') THEN
+			ALTER TABLE environments ADD COLUMN runtime VARCHAR(50) NOT NULL DEFAULT 'deno';
+		END IF;
+	END $$;
 
 	CREATE TABLE IF NOT EXISTS executions (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

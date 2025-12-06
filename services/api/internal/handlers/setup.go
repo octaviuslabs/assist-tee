@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -9,12 +10,24 @@ import (
 	"github.com/jsfour/assist-tee/internal/models"
 )
 
+const maxSetupBodySize = 10 << 20 // 10 MB for setup (code can be large)
+
 func (s *Server) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logger.FromContext(ctx)
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxSetupBodySize)
+
 	var req models.SetupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			log.Warn("request body too large",
+				slog.Int64("limit", maxSetupBodySize),
+			)
+			writeErrorWithCode(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds 10 MB limit")
+			return
+		}
 		log.Warn("failed to decode setup request",
 			slog.String("error", err.Error()),
 		)
