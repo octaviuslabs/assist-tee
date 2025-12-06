@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,38 @@ import (
 )
 
 var execSemaphore = make(chan struct{}, 50) // Max 50 concurrent executions
+var setupSemaphore chan struct{}
+var validModuleNameRegex = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// isValidModuleName validates that a module filename is safe to use
+func isValidModuleName(name string) bool {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	if strings.HasPrefix(name, "/") {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	return validModuleNameRegex.MatchString(name)
+}
+
+// containsShellMetacharacters checks if a string contains shell metacharacters
+func containsShellMetacharacters(s string) bool {
+	metachars := ";|&$`(){}<>\n\r"
+	return strings.ContainsAny(s, metachars)
+}
+
+func init() {
+	concurrency := 10
+	if envVal := os.Getenv("SETUP_CONCURRENCY"); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil && parsed > 0 {
+			concurrency = parsed
+		}
+	}
+	setupSemaphore = make(chan struct{}, concurrency)
+}
 
 // RuntimeImage returns the Docker image to use for code execution based on runtime type
 func RuntimeImage(runtime models.Runtime) string {
@@ -57,9 +91,20 @@ func IsGVisorDisabled() bool {
 }
 
 func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.Environment, error) {
+	log := logger.FromContext(ctx)
+
+	// Acquire semaphore
+	log.Debug("acquiring setup semaphore")
+	select {
+	case setupSemaphore <- struct{}{}:
+		defer func() { <-setupSemaphore }()
+	case <-ctx.Done():
+		log.Warn("context cancelled while waiting for setup semaphore")
+		return nil, ctx.Err()
+	}
+
 	envID := uuid.New()
 	volumeName := fmt.Sprintf("tee-env-%s", envID.String())
-	log := logger.FromContext(ctx)
 
 	// Default to deno runtime if not specified
 	runtime := req.Runtime
@@ -88,23 +133,36 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
 
-	// 2. Write modules to volume
+	// 2. Validate and write modules to volume
 	// The deno user in the container has UID 1000, so we need to set ownership
+	for filename := range req.Modules {
+		if !isValidModuleName(filename) {
+			log.Error("invalid module filename",
+				slog.String("filename", filename),
+			)
+			exec.Command("docker", "volume", "rm", "-f", volumeName).Run()
+			return nil, fmt.Errorf("invalid module filename: %s", filename)
+		}
+	}
+
 	for filename, content := range req.Modules {
 		log.Debug("writing module to volume",
 			slog.String("filename", filename),
 			slog.Int("content_length", len(content)),
 		)
 
-		// Escape single quotes in content
-		escapedContent := strings.ReplaceAll(content, "'", "'\\''")
-
-		writeCmd := fmt.Sprintf("cat > /workspace/%s <<'EOF'\n%s\nEOF", filename, escapedContent)
-		cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+		// Write content via stdin to avoid shell injection
+		writeArgs := []string{"run", "--rm", "-i"}
+		if !IsGVisorDisabled() {
+			writeArgs = append(writeArgs, "--runtime=runsc")
+		}
+		writeArgs = append(writeArgs,
 			"-v", fmt.Sprintf("%s:/workspace", volumeName),
 			"busybox:latest",
-			"sh", "-c", writeCmd,
+			"sh", "-c", fmt.Sprintf("cat > /workspace/%s", filename),
 		)
+		cmd := exec.CommandContext(ctx, "docker", writeArgs...)
+		cmd.Stdin = strings.NewReader(content)
 
 		if err := cmd.Run(); err != nil {
 			log.Error("failed to write module",
@@ -122,11 +180,16 @@ func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.Setup
 		slog.String("runtime", string(runtime)),
 		slog.String("uid", RuntimeUserID(runtime)),
 	)
-	chownCmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+	chownArgs := []string{"run", "--rm"}
+	if !IsGVisorDisabled() {
+		chownArgs = append(chownArgs, "--runtime=runsc")
+	}
+	chownArgs = append(chownArgs,
 		"-v", fmt.Sprintf("%s:/workspace", volumeName),
 		"busybox:latest",
 		"sh", "-c", fmt.Sprintf("chown -R %s:%s /workspace", RuntimeUserID(runtime), RuntimeUserID(runtime)),
 	)
+	chownCmd := exec.CommandContext(ctx, "docker", chownArgs...)
 	if err := chownCmd.Run(); err != nil {
 		log.Warn("failed to set volume ownership",
 			slog.String("error", err.Error()),
@@ -292,6 +355,27 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		}
 	}
 
+	// Apply hard caps (configurable via environment variables)
+	maxTimeoutMs := 60000
+	if envVal := os.Getenv("MAX_TIMEOUT_MS"); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil && parsed > 0 {
+			maxTimeoutMs = parsed
+		}
+	}
+	maxMemoryMb := 512
+	if envVal := os.Getenv("MAX_MEMORY_MB"); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil && parsed > 0 {
+			maxMemoryMb = parsed
+		}
+	}
+
+	if timeoutMs > maxTimeoutMs {
+		timeoutMs = maxTimeoutMs
+	}
+	if memoryMb > maxMemoryMb {
+		memoryMb = maxMemoryMb
+	}
+
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -349,6 +433,7 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 	// Continue with other args
 	args = append(args,
 		"--network=none",
+		"--user=1000:1000",
 		"--read-only",
 		fmt.Sprintf("--memory=%dm", memoryMb),
 		"--cpus=0.5",
@@ -367,6 +452,12 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 			"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Deno cache location
 			"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
 		)
+
+		// Build ALLOWED_ENV_VARS from permissions.allowEnv
+		allowedEnvVars := buildAllowedEnvVars(metadata, req.Env)
+		if allowedEnvVars != "" {
+			args = append(args, "-e", fmt.Sprintf("ALLOWED_ENV_VARS=%s", allowedEnvVars))
+		}
 	}
 
 	args = append(args, RuntimeImage(runtime))
@@ -628,142 +719,268 @@ func installDependencies(ctx context.Context, volumeName string, deps *models.De
 
 	log := logger.FromContext(ctx)
 
-	var cacheCommands []string
-	var dockerArgs []string
-
-	switch runtime {
-	case models.RuntimeBun:
-		// Build bun install commands
-		if len(deps.NPM) > 0 {
-			log.Info("preparing npm dependencies for bun",
-				slog.Any("packages", deps.NPM),
-			)
-			// Bun can install all packages at once
-			cacheCommands = append(cacheCommands, fmt.Sprintf("bun install %s", strings.Join(deps.NPM, " ")))
+	// Validate all package names and URLs before processing
+	for _, pkg := range deps.NPM {
+		if containsShellMetacharacters(pkg) {
+			return fmt.Errorf("invalid npm package name: %s", pkg)
 		}
-
-		// Deno-specific URLs are not supported in bun
-		if len(deps.Deno) > 0 {
-			log.Warn("deno dependencies are not supported in bun runtime, ignoring",
-				slog.Any("modules", deps.Deno),
-			)
-		}
-
-		if len(cacheCommands) == 0 {
-			log.Debug("no dependencies to install")
-			return nil
-		}
-
-		cacheScript := strings.Join(cacheCommands, " && ")
-
-		log.Info("starting dependency installation",
-			slog.String("volume_name", volumeName),
-			slog.String("runtime", string(runtime)),
-			slog.Int("command_count", len(cacheCommands)),
-			slog.String("script", cacheScript),
-		)
-
-		// Build docker command for bun
-		dockerArgs = []string{
-			"run", "--rm",
-			"--entrypoint", "sh",
-			"--network=bridge",
-			"-v", fmt.Sprintf("%s:/workspace", volumeName),
-			"-w", "/workspace",
-			RuntimeImage(runtime),
-			"-c", cacheScript,
-		}
-
-	default: // deno
-		// Build deno cache commands
-		if len(deps.NPM) > 0 {
-			log.Info("preparing npm dependencies",
-				slog.Any("packages", deps.NPM),
-			)
-			for _, pkg := range deps.NPM {
-				cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache --node-modules-dir npm:%s", pkg))
-			}
-		}
-
-		// Cache deno dependencies
-		if len(deps.Deno) > 0 {
-			log.Info("preparing deno dependencies",
-				slog.Any("modules", deps.Deno),
-			)
-			for _, url := range deps.Deno {
-				cacheCommands = append(cacheCommands, fmt.Sprintf("deno cache %s", url))
-			}
-		}
-
-		if len(cacheCommands) == 0 {
-			log.Debug("no dependencies to install")
-			return nil
-		}
-
-		cacheScript := strings.Join(cacheCommands, " && ")
-
-		log.Info("starting dependency installation",
-			slog.String("volume_name", volumeName),
-			slog.String("runtime", string(runtime)),
-			slog.Int("command_count", len(cacheCommands)),
-			slog.String("script", cacheScript),
-		)
-
-		// Build docker command for deno
-		dockerArgs = []string{
-			"run", "--rm",
-			"--entrypoint", "sh",
-			"--network=bridge",
-			"-v", fmt.Sprintf("%s:/workspace", volumeName),
-			"-v", fmt.Sprintf("%s:/deno-dir", volumeName),
-			"-e", "DENO_DIR=/deno-dir",
-			"-w", "/workspace",
-			RuntimeImage(runtime),
-			"-c", cacheScript,
+	}
+	for _, url := range deps.Deno {
+		if containsShellMetacharacters(url) {
+			return fmt.Errorf("invalid deno module URL: %s", url)
 		}
 	}
 
-	// Run dependency installation with streaming output
-	startTime := time.Now()
-	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
+	switch runtime {
+	case models.RuntimeBun:
+		return installBunDependencies(ctx, volumeName, deps, log)
+	default:
+		return installDenoDependencies(ctx, volumeName, deps, log)
+	}
+}
 
-	// Create streaming writers that log output in real-time
+// installBunDependencies installs npm packages using bun
+func installBunDependencies(ctx context.Context, volumeName string, deps *models.Dependencies, log *slog.Logger) error {
+	if len(deps.NPM) == 0 {
+		log.Debug("no npm dependencies to install for bun")
+		return nil
+	}
+
+	if len(deps.Deno) > 0 {
+		log.Warn("deno dependencies are not supported in bun runtime, ignoring",
+			slog.Any("modules", deps.Deno),
+		)
+	}
+
+	log.Info("installing npm dependencies for bun",
+		slog.Any("packages", deps.NPM),
+	)
+
+	startTime := time.Now()
+
+	// Build docker args - pass packages directly to bun add without shell
+	args := []string{"run", "--rm"}
+	if !IsGVisorDisabled() {
+		args = append(args, "--runtime=runsc")
+	}
+	args = append(args,
+		"--network=bridge",
+		"-v", fmt.Sprintf("%s:/workspace", volumeName),
+		"-w", "/workspace",
+		RuntimeImage(models.RuntimeBun),
+		"add",
+	)
+	args = append(args, deps.NPM...)
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+
 	stdoutWriter := &streamingWriter{log: log, stream: "stdout", prefix: "dependency install"}
 	stderrWriter := &streamingWriter{log: log, stream: "stderr", prefix: "dependency install"}
 
-	// Also capture full output for error reporting
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = io.MultiWriter(stdoutWriter, &stdoutBuf)
 	cmd.Stderr = io.MultiWriter(stderrWriter, &stderrBuf)
 
 	err := cmd.Run()
-
-	// Flush any remaining buffered output
 	stdoutWriter.Flush()
 	stderrWriter.Flush()
 
 	duration := time.Since(startTime)
 
 	if err != nil {
-		log.Error("dependency installation failed",
+		log.Error("bun dependency installation failed",
 			slog.String("volume_name", volumeName),
-			slog.String("runtime", string(runtime)),
 			slog.String("error", err.Error()),
 			slog.Int64("duration_ms", duration.Milliseconds()),
 		)
-		// Include both stdout and stderr in error for debugging
 		combinedOutput := stderrBuf.String()
 		if combinedOutput == "" {
 			combinedOutput = stdoutBuf.String()
 		}
-		return fmt.Errorf("dependency installation failed: %w - output: %s", err, combinedOutput)
+		return fmt.Errorf("bun dependency installation failed: %w - output: %s", err, combinedOutput)
 	}
 
-	log.Info("dependency installation completed",
+	log.Info("bun dependency installation completed",
 		slog.String("volume_name", volumeName),
-		slog.String("runtime", string(runtime)),
 		slog.Int64("duration_ms", duration.Milliseconds()),
 	)
 
 	return nil
+}
+
+// installDenoDependencies installs npm and deno packages using deno cache
+func installDenoDependencies(ctx context.Context, volumeName string, deps *models.Dependencies, log *slog.Logger) error {
+	if len(deps.NPM) == 0 && len(deps.Deno) == 0 {
+		log.Debug("no dependencies to install for deno")
+		return nil
+	}
+
+	startTime := time.Now()
+
+	// Install each npm package separately to avoid shell injection
+	for _, pkg := range deps.NPM {
+		log.Info("caching npm package",
+			slog.String("package", pkg),
+		)
+
+		args := []string{"run", "--rm"}
+		if !IsGVisorDisabled() {
+			args = append(args, "--runtime=runsc")
+		}
+		args = append(args,
+			"--network=bridge",
+			"-v", fmt.Sprintf("%s:/workspace", volumeName),
+			"-v", fmt.Sprintf("%s:/deno-dir", volumeName),
+			"-e", "DENO_DIR=/deno-dir",
+			"-w", "/workspace",
+			RuntimeImage(models.RuntimeDeno),
+			"cache", "--node-modules-dir", "npm:"+pkg,
+		)
+
+		cmd := exec.CommandContext(ctx, "docker", args...)
+
+		stdoutWriter := &streamingWriter{log: log, stream: "stdout", prefix: "dependency install"}
+		stderrWriter := &streamingWriter{log: log, stream: "stderr", prefix: "dependency install"}
+
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmd.Stdout = io.MultiWriter(stdoutWriter, &stdoutBuf)
+		cmd.Stderr = io.MultiWriter(stderrWriter, &stderrBuf)
+
+		if err := cmd.Run(); err != nil {
+			stdoutWriter.Flush()
+			stderrWriter.Flush()
+			combinedOutput := stderrBuf.String()
+			if combinedOutput == "" {
+				combinedOutput = stdoutBuf.String()
+			}
+			return fmt.Errorf("failed to cache npm package %s: %w - output: %s", pkg, err, combinedOutput)
+		}
+		stdoutWriter.Flush()
+		stderrWriter.Flush()
+	}
+
+	// Install each deno module separately to avoid shell injection
+	for _, url := range deps.Deno {
+		log.Info("caching deno module",
+			slog.String("url", url),
+		)
+
+		args := []string{"run", "--rm"}
+		if !IsGVisorDisabled() {
+			args = append(args, "--runtime=runsc")
+		}
+		args = append(args,
+			"--network=bridge",
+			"-v", fmt.Sprintf("%s:/workspace", volumeName),
+			"-v", fmt.Sprintf("%s:/deno-dir", volumeName),
+			"-e", "DENO_DIR=/deno-dir",
+			"-w", "/workspace",
+			RuntimeImage(models.RuntimeDeno),
+			"cache", url,
+		)
+
+		cmd := exec.CommandContext(ctx, "docker", args...)
+
+		stdoutWriter := &streamingWriter{log: log, stream: "stdout", prefix: "dependency install"}
+		stderrWriter := &streamingWriter{log: log, stream: "stderr", prefix: "dependency install"}
+
+		var stdoutBuf, stderrBuf bytes.Buffer
+		cmd.Stdout = io.MultiWriter(stdoutWriter, &stdoutBuf)
+		cmd.Stderr = io.MultiWriter(stderrWriter, &stderrBuf)
+
+		if err := cmd.Run(); err != nil {
+			stdoutWriter.Flush()
+			stderrWriter.Flush()
+			combinedOutput := stderrBuf.String()
+			if combinedOutput == "" {
+				combinedOutput = stdoutBuf.String()
+			}
+			return fmt.Errorf("failed to cache deno module %s: %w - output: %s", url, err, combinedOutput)
+		}
+		stdoutWriter.Flush()
+		stderrWriter.Flush()
+	}
+
+	duration := time.Since(startTime)
+
+	log.Info("deno dependency installation completed",
+		slog.String("volume_name", volumeName),
+		slog.Int("npm_count", len(deps.NPM)),
+		slog.Int("deno_count", len(deps.Deno)),
+		slog.Int64("duration_ms", duration.Milliseconds()),
+	)
+
+	return nil
+}
+
+// buildAllowedEnvVars constructs the ALLOWED_ENV_VARS string based on permissions
+// and the env vars being passed in the execute request.
+// Returns empty string if all env vars should be allowed (no restrictions).
+func buildAllowedEnvVars(metadata map[string]interface{}, reqEnv map[string]string) string {
+	if metadata == nil {
+		return "" // No metadata = allow all (backwards compatibility)
+	}
+
+	permissions, ok := metadata["permissions"]
+	if !ok || permissions == nil {
+		return "" // No permissions specified = allow all
+	}
+
+	permMap, ok := permissions.(map[string]interface{})
+	if !ok {
+		return "" // Invalid permissions format = allow all
+	}
+
+	allowEnv, ok := permMap["allowEnv"]
+	if !ok || allowEnv == nil {
+		return "" // No allowEnv specified = allow all
+	}
+
+	// If allowEnv is true (boolean), allow all
+	if allow, ok := allowEnv.(bool); ok && allow {
+		return ""
+	}
+
+	// If allowEnv is a list of strings, use those as the allowed vars
+	// intersected with the vars being passed in reqEnv
+	var allowedVars []string
+
+	switch v := allowEnv.(type) {
+	case []interface{}:
+		// Convert []interface{} to []string and intersect with reqEnv keys
+		allowedSet := make(map[string]bool)
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				allowedSet[s] = true
+			}
+		}
+		// Only include vars that are both allowed AND being passed
+		for key := range reqEnv {
+			if allowedSet[key] {
+				allowedVars = append(allowedVars, key)
+			}
+		}
+	case []string:
+		// Direct string slice (less common from JSON unmarshal)
+		allowedSet := make(map[string]bool)
+		for _, s := range v {
+			allowedSet[s] = true
+		}
+		for key := range reqEnv {
+			if allowedSet[key] {
+				allowedVars = append(allowedVars, key)
+			}
+		}
+	default:
+		// Unknown format = allow all for safety
+		return ""
+	}
+
+	if len(allowedVars) == 0 {
+		// If no vars are allowed, pass a dummy value to ensure --allow-env has no vars
+		// This effectively blocks all env access
+		return "__NONE__"
+	}
+
+	return strings.Join(allowedVars, ",")
 }

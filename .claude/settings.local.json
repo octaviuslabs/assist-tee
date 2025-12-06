@@ -5,7 +5,12 @@
       "WebFetch(domain:www.anthropic.com)",
       "WebSearch",
       "Bash(chmod:*)",
-      "Bash(go test:*)"
+      "Bash(go test:*)",
+      "Bash(mkdir:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
