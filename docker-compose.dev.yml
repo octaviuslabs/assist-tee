@@ -41,6 +41,7 @@ services:
       - LOG_LEVEL=debug
       # ⚠️ DISABLE gVisor for development on non-Linux systems
       - DISABLE_GVISOR=true
+      - BEARER_TOKEN=test-token
     depends_on:
       postgres:
         condition: service_healthy

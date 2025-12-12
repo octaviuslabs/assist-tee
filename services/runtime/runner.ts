@@ -250,8 +250,23 @@ async function main() {
     Deno.exit(0);
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    let errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
+    const errorName = error instanceof Error ? error.name : "Error";
+
+    // Enhance error messages for common Deno permission errors
+    if (errorName === "PermissionDenied" || errorMessage.includes("Requires net access")) {
+      // Extract domain from error message if possible
+      const domainMatch = errorMessage.match(/Requires net access to "([^"]+)"/);
+      if (domainMatch) {
+        errorMessage = `Network access denied: domain "${domainMatch[1]}" is not in the allowNet whitelist. Add it to permissions.allowNet during setup to enable access.`;
+      } else {
+        errorMessage = `Network access denied: ${errorMessage}. Configure permissions.allowNet during setup to enable network access.`;
+      }
+    } else if (errorMessage.includes("error sending request") || errorMessage.includes("fetch failed")) {
+      // Handle network errors when network is completely disabled
+      errorMessage = `Network request failed: ${errorMessage}. Network access is disabled by default. Configure permissions.allowNet during setup to enable network access to specific domains.`;
+    }
 
     debugLog("execution failed", {
       error: errorMessage,

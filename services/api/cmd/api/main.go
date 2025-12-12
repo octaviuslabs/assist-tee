@@ -24,13 +24,19 @@ func main() {
 		AddSource:  false,
 	})
 
+	// Initialize authentication (fails fast if misconfigured)
+	if err := middleware.InitAuth(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %s\n", err.Error())
+		os.Exit(1)
+	}
+
 	// Print startup banner to stdout (not through logger for visual clarity)
 	fmt.Println("=" + strings.Repeat("=", 78))
 	fmt.Println("  TEE API Server - Trusted Execution Environment")
 	fmt.Println("=" + strings.Repeat("=", 78))
 
 	logger.Log.Info("server starting",
-		slog.String("version", "1.0.0"),
+		slog.String("version", "1.1.0"),
 	)
 
 	// Check gVisor status and display warnings
@@ -119,8 +125,8 @@ func main() {
 		w.Write([]byte("OK"))
 	}).Methods("GET")
 
-	// Apply middleware (order matters: recovery -> logging -> routes)
-	handler := middleware.Recovery(middleware.RequestLogging(r))
+	// Apply middleware (order matters: recovery -> logging -> auth -> routes)
+	handler := middleware.Recovery(middleware.RequestLogging(middleware.BearerAuth(r)))
 
 	// Start server
 	port := getEnv("PORT", "8080")

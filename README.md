@@ -427,10 +427,32 @@ docker run -d --name tee-api \
 ## Security
 
 - **gVisor Runtime**: Hardware virtualization for kernel isolation
-- **Network Isolation**: `--network=none` by default
+- **Network Isolation**: `--network=none` by default (configurable via whitelist)
 - **Read-only Filesystem**: Container root is read-only
 - **Resource Limits**: Memory, CPU, and timeout limits enforced
-- **Permissions**: Fine-grained Deno permissions (future enhancement)
+- **Permission Whitelisting**: Fine-grained control over network access and environment variables
+
+### Permission Whitelisting
+
+Configure allowed network domains and environment variables during setup:
+
+```bash
+curl -X POST http://localhost:8080/setup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mainModule": "main.ts",
+    "modules": {"main.ts": "export async function handler(e,c) { return await fetch(\"https://api.example.com/data\").then(r => r.json()); }"},
+    "permissions": {
+      "allowNet": ["api.example.com", "cdn.example.com:443"],
+      "allowEnv": ["API_KEY", "DEBUG"]
+    }
+  }'
+```
+
+- **allowNet**: List of domains the code can access (enables `--network=bridge` + Deno `--allow-net=...`)
+- **allowEnv**: List of env var names that can be passed from execute requests to the container
+
+See [docs/SECURITY.md](docs/SECURITY.md#permission-whitelisting) for details.
 
 ## Configuration
 

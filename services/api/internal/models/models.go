@@ -38,13 +38,22 @@ type ExecuteRequest struct {
 }
 
 type Permissions struct {
-	AllowNet    interface{} `json:"allowNet,omitempty"`
-	AllowRead   interface{} `json:"allowRead,omitempty"`
-	AllowWrite  interface{} `json:"allowWrite,omitempty"`
-	AllowEnv    interface{} `json:"allowEnv,omitempty"`
-	AllowRun    interface{} `json:"allowRun,omitempty"`
-	AllowFfi    bool        `json:"allowFfi,omitempty"`
-	AllowHrtime bool        `json:"allowHrtime,omitempty"`
+	// Network whitelist: list of allowed domains/URLs (e.g., ["api.example.com", "cdn.example.com:443"])
+	// If empty or nil, network access is blocked (default secure behavior)
+	AllowNet []string `json:"allowNet,omitempty"`
+
+	// Environment variable whitelist: list of env var names that can be passed to execution
+	// Only env vars in this list will be forwarded from ExecuteRequest.Env to the container
+	AllowEnv []string `json:"allowEnv,omitempty"`
+
+	// File permissions (reserved for future use)
+	AllowRead  []string `json:"allowRead,omitempty"`
+	AllowWrite []string `json:"allowWrite,omitempty"`
+
+	// Dangerous permissions (reserved for future use, default false)
+	AllowRun    bool `json:"allowRun,omitempty"`
+	AllowFfi    bool `json:"allowFfi,omitempty"`
+	AllowHrtime bool `json:"allowHrtime,omitempty"`
 }
 
 type ResourceLimits struct {

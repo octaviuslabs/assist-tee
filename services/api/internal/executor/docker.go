@@ -34,6 +34,16 @@ func IsGVisorDisabled() bool {
 	return os.Getenv("DISABLE_GVISOR") == "true" || os.Getenv("DISABLE_GVISOR") == "1"
 }
 
+// isGVisorRuntimeError checks if an error is related to missing gVisor runtime
+func isGVisorRuntimeError(err error, stderr string) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error() + stderr
+	return strings.Contains(errStr, "unknown or invalid runtime name: runsc") ||
+		strings.Contains(errStr, "runtime \"runsc\" not found")
+}
+
 func (e *DockerExecutor) SetupEnvironment(ctx context.Context, req *models.SetupRequest) (*models.Environment, error) {
 	envID := uuid.New()
 	volumeName := fmt.Sprintf("tee-env-%s", envID.String())
@@ -236,6 +246,16 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		json.Unmarshal(metadataJSON, &metadata)
 	}
 
+	// Extract permissions from metadata
+	var permissions *models.Permissions
+	if metadata != nil {
+		if permData, ok := metadata["permissions"]; ok && permData != nil {
+			permJSON, _ := json.Marshal(permData)
+			permissions = &models.Permissions{}
+			json.Unmarshal(permJSON, permissions)
+		}
+	}
+
 	// 2. Apply limits
 	timeoutMs := 5000
 	memoryMb := 128
@@ -301,9 +321,19 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		)
 	}
 
+	// Determine network mode based on permissions
+	networkMode := "none"
+	if permissions != nil && len(permissions.AllowNet) > 0 {
+		networkMode = "bridge"
+		log.Info("network access enabled with whitelist",
+			slog.String("environment_id", envID.String()),
+			slog.Any("allowed_domains", permissions.AllowNet),
+		)
+	}
+
 	// Continue with other args
 	args = append(args,
-		"--network=none",
+		fmt.Sprintf("--network=%s", networkMode),
 		"--read-only",
 		fmt.Sprintf("--memory=%dm", memoryMb),
 		"--cpus=0.5",
@@ -311,8 +341,53 @@ func (e *DockerExecutor) ExecuteInEnvironment(ctx context.Context, envID uuid.UU
 		"-v", fmt.Sprintf("%s:/workspace:ro", volumeName),
 		"-v", fmt.Sprintf("%s:/deno-dir:ro", volumeName), // Mount cached dependencies
 		"-e", "DENO_DIR=/deno-dir",                       // Tell Deno where to find cache
-		RuntimeImage(),
 	)
+
+	// Build env var whitelist set for quick lookup
+	allowedEnvVars := make(map[string]bool)
+	if permissions != nil {
+		for _, envVar := range permissions.AllowEnv {
+			allowedEnvVars[envVar] = true
+		}
+	}
+
+	// Pass whitelisted environment variables to container
+	if req.Env != nil && len(allowedEnvVars) > 0 {
+		for key, value := range req.Env {
+			if allowedEnvVars[key] {
+				args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+				log.Debug("passing whitelisted env var",
+					slog.String("key", key),
+				)
+			} else {
+				log.Debug("env var not in whitelist, skipping",
+					slog.String("key", key),
+				)
+			}
+		}
+	}
+
+	// Build Deno permission flags
+	denoPermissions := "--allow-read=/workspace,/runtime,/deno-dir --allow-env"
+	if permissions != nil && len(permissions.AllowNet) > 0 {
+		// Add network permission with domain whitelist
+		denoPermissions += fmt.Sprintf(" --allow-net=%s", strings.Join(permissions.AllowNet, ","))
+	}
+
+	// Override entrypoint to pass custom Deno permissions
+	args = append(args,
+		"--entrypoint", "deno",
+		RuntimeImage(),
+		"run",
+	)
+	// Add Deno permission flags
+	for _, perm := range strings.Split(denoPermissions, " ") {
+		if perm != "" {
+			args = append(args, perm)
+		}
+	}
+	// Add the runner script path
+	args = append(args, "/runtime/runner.ts")
 
 	// 5. Execute with stdin
 	startTime := time.Now()
