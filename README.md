@@ -458,13 +458,19 @@ See [docs/SECURITY.md](docs/SECURITY.md#permission-whitelisting) for details.
 
 Environment variables for the API service:
 
-- `DB_HOST` - PostgreSQL host (default: postgres)
-- `DB_PORT` - PostgreSQL port (default: 5432)
-- `DB_USER` - PostgreSQL user (default: tee)
-- `DB_PASSWORD` - PostgreSQL password (default: tee)
-- `DB_NAME` - PostgreSQL database (default: tee)
-- `LOG_LEVEL` - Log level (default: debug)
-- `DISABLE_GVISOR` - Set to `true` or `1` to disable gVisor (⚠️ DEV ONLY!)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | Server port |
+| `DB_HOST` | `postgres` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | `tee` | PostgreSQL user |
+| `DB_PASSWORD` | `tee` | PostgreSQL password |
+| `DB_NAME` | `tee` | PostgreSQL database |
+| `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `RUNTIME_IMAGE` | `octaviusdeployment/assist-tee-rt-deno:latest` | Docker image for runtime execution |
+| `BEARER_TOKEN` | *(required)* | Authentication token for API endpoints |
+| `DISABLE_BEARER_TOKEN` | `false` | Set to `true` to disable auth (⚠️ DEV ONLY!) |
+| `DISABLE_GVISOR` | `false` | Set to `true` or `1` to disable gVisor (⚠️ DEV ONLY!)
 
 ### Disabling gVisor (Development Mode)
 
